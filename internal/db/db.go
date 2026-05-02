@@ -1,0 +1,405 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
+
+	"github.com/djpadz/email-automation/internal/models"
+)
+
+// DB wraps a pgx connection pool and provides data access methods.
+type DB struct {
+	Pool *pgxpool.Pool
+}
+
+// New creates a new database connection pool.
+func New(ctx context.Context, databaseURL string) (*DB, error) {
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+
+	config.MaxConns = 20
+	config.MinConns = 2
+	config.MaxConnLifetime = 30 * time.Minute
+	config.MaxConnIdleTime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("create pool: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	return &DB{Pool: pool}, nil
+}
+
+// Close shuts down the connection pool.
+func (db *DB) Close() {
+	db.Pool.Close()
+}
+
+// RunMigrations applies SQL migration files from the given directory.
+func (db *DB) RunMigrations(ctx context.Context, migrationsDir string) error {
+	// Create migrations tracking table
+	_, err := db.Pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create migrations table: %w", err)
+	}
+
+	// Read migration files
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	var upFiles []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".up.sql") {
+			upFiles = append(upFiles, e.Name())
+		}
+	}
+	sort.Strings(upFiles)
+
+	for _, fname := range upFiles {
+		version := strings.TrimSuffix(fname, ".up.sql")
+
+		// Check if already applied
+		var count int
+		err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = $1", version).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("check migration %s: %w", version, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		// Read and execute
+		sql, err := os.ReadFile(filepath.Join(migrationsDir, fname))
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", fname, err)
+		}
+
+		log.Info().Str("migration", version).Msg("applying migration")
+
+		tx, err := db.Pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx for %s: %w", version, err)
+		}
+
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("execute migration %s: %w", version, err)
+		}
+
+		if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", version); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("record migration %s: %w", version, err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit migration %s: %w", version, err)
+		}
+
+		log.Info().Str("migration", version).Msg("migration applied")
+	}
+
+	return nil
+}
+
+// --- Tenant operations ---
+
+func (db *DB) CreateTenant(ctx context.Context, t *models.Tenant) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO tenants (name, slug, api_key) VALUES ($1, $2, $3)
+		 RETURNING id, created_at, updated_at`,
+		t.Name, t.Slug, t.APIKey,
+	).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
+}
+
+func (db *DB) GetTenant(ctx context.Context, id int64) (*models.Tenant, error) {
+	t := &models.Tenant{}
+	err := db.Pool.QueryRow(ctx,
+		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants WHERE id = $1`, id,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (db *DB) GetTenantByAPIKey(ctx context.Context, apiKey string) (*models.Tenant, error) {
+	t := &models.Tenant{}
+	err := db.Pool.QueryRow(ctx,
+		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants WHERE api_key = $1`, apiKey,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func (db *DB) ListTenants(ctx context.Context) ([]models.Tenant, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tenants []models.Tenant
+	for rows.Next() {
+		var t models.Tenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tenants = append(tenants, t)
+	}
+	return tenants, rows.Err()
+}
+
+// --- Account operations ---
+
+func (db *DB) CreateAccount(ctx context.Context, a *models.Account) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO accounts (tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING id, created_at, updated_at`,
+		a.TenantID, a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.Active,
+	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+}
+
+func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Account, error) {
+	a := &models.Account{}
+	err := db.Pool.QueryRow(ctx,
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active, last_sync_at, created_at, updated_at
+		 FROM accounts WHERE id = $1 AND tenant_id = $2`, id, tenantID,
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Account, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, active, last_sync_at, created_at, updated_at
+		 FROM accounts WHERE tenant_id = $1 ORDER BY id`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []models.Account
+	for rows.Next() {
+		var a models.Account
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, rows.Err()
+}
+
+func (db *DB) ListActiveAccounts(ctx context.Context) ([]models.Account, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active, last_sync_at, created_at, updated_at
+		 FROM accounts WHERE active = true ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []models.Account
+	for rows.Next() {
+		var a models.Account
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, rows.Err()
+}
+
+func (db *DB) UpdateAccount(ctx context.Context, a *models.Account) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE accounts SET name=$1, email=$2, provider=$3, imap_host=$4, imap_port=$5, imap_tls=$6, username=$7, password=$8, oauth_token=$9, active=$10, updated_at=NOW()
+		 WHERE id=$11 AND tenant_id=$12`,
+		a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.Active, a.ID, a.TenantID)
+	return err
+}
+
+func (db *DB) DeleteAccount(ctx context.Context, tenantID, id int64) error {
+	_, err := db.Pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	return err
+}
+
+func (db *DB) UpdateAccountSyncTime(ctx context.Context, accountID int64) error {
+	_, err := db.Pool.Exec(ctx, `UPDATE accounts SET last_sync_at = NOW() WHERE id = $1`, accountID)
+	return err
+}
+
+// --- Rule operations ---
+
+func (db *DB) CreateRule(ctx context.Context, r *models.Rule) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO rules (tenant_id, name, description, lua_code, priority, active)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at, updated_at`,
+		r.TenantID, r.Name, r.Description, r.LuaCode, r.Priority, r.Active,
+	).Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
+}
+
+func (db *DB) GetRule(ctx context.Context, tenantID, id int64) (*models.Rule, error) {
+	r := &models.Rule{}
+	err := db.Pool.QueryRow(ctx,
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
+		 FROM rules WHERE id = $1 AND tenant_id = $2`, id, tenantID,
+	).Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
+		 FROM rules WHERE tenant_id = $1 ORDER BY priority, id`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []models.Rule
+	for rows.Next() {
+		var r models.Rule
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
+		 FROM rules WHERE tenant_id = $1 AND active = true ORDER BY priority, id`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []models.Rule
+	for rows.Next() {
+		var r models.Rule
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+func (db *DB) UpdateRule(ctx context.Context, r *models.Rule) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE rules SET name=$1, description=$2, lua_code=$3, priority=$4, active=$5, updated_at=NOW()
+		 WHERE id=$6 AND tenant_id=$7`,
+		r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.ID, r.TenantID)
+	return err
+}
+
+func (db *DB) DeleteRule(ctx context.Context, tenantID, id int64) error {
+	_, err := db.Pool.Exec(ctx, `DELETE FROM rules WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	return err
+}
+
+// --- Execution log operations ---
+
+func (db *DB) LogExecution(ctx context.Context, l *models.RuleExecutionLog) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO rule_execution_log (rule_id, account_id, message_id, subject, sender, action, target, success, error)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING id, executed_at`,
+		l.RuleID, l.AccountID, l.MessageID, l.Subject, l.Sender, l.Action, l.Target, l.Success, l.Error,
+	).Scan(&l.ID, &l.ExecutedAt)
+}
+
+func (db *DB) ListExecutionLogs(ctx context.Context, tenantID int64, limit int) ([]models.RuleExecutionLog, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT l.id, l.rule_id, l.account_id, l.message_id, l.subject, l.sender, l.action, l.target, l.success, l.error, l.executed_at
+		 FROM rule_execution_log l
+		 JOIN rules r ON r.id = l.rule_id
+		 WHERE r.tenant_id = $1
+		 ORDER BY l.executed_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []models.RuleExecutionLog
+	for rows.Next() {
+		var l models.RuleExecutionLog
+		if err := rows.Scan(&l.ID, &l.RuleID, &l.AccountID, &l.MessageID, &l.Subject, &l.Sender, &l.Action, &l.Target, &l.Success, &l.Error, &l.ExecutedAt); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, rows.Err()
+}
+
+// --- Deferred action operations ---
+
+func (db *DB) CreateDeferredAction(ctx context.Context, d *models.DeferredAction) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO deferred_actions (rule_id, account_id, message_id, action, target, execute_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		d.RuleID, d.AccountID, d.MessageID, d.Action, d.Target, d.ExecuteAt,
+	).Scan(&d.ID, &d.CreatedAt)
+}
+
+func (db *DB) GetPendingDeferredActions(ctx context.Context) ([]models.DeferredAction, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, rule_id, account_id, message_id, action, target, execute_at, created_at
+		 FROM deferred_actions
+		 WHERE executed = false AND execute_at <= NOW()
+		 ORDER BY execute_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var actions []models.DeferredAction
+	for rows.Next() {
+		var d models.DeferredAction
+		if err := rows.Scan(&d.ID, &d.RuleID, &d.AccountID, &d.MessageID, &d.Action, &d.Target, &d.ExecuteAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		actions = append(actions, d)
+	}
+	return actions, rows.Err()
+}
+
+func (db *DB) MarkDeferredActionDone(ctx context.Context, id int64, errMsg string) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE deferred_actions SET executed = true, error = $2 WHERE id = $1`, id, errMsg)
+	return err
+}

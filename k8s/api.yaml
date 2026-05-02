@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: email-automation
+  labels:
+    app.kubernetes.io/name: email-automation
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: email-automation
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: email-automation
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: email-automation
+      containers:
+        - name: api
+          image: registry.container-registry.svc.cluster.local:32000/email-automation:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+            - name: NATS_URL
+              value: "nats://nats:4222"
+            - name: RULES_DIR
+              value: "/app/rules"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LOG_JSON
+              value: "true"
+            - name: IMAP_WORKER_COUNT
+              value: "4"
+            - name: IMAP_POLL_INTERVAL
+              value: "5m"
+            - name: SCHEDULER_INTERVAL
+              value: "30s"
+          envFrom:
+            - secretRef:
+                name: email-automation-secrets
+          volumeMounts:
+            - name: rules
+              mountPath: /app/rules
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: rules
+          configMap:
+            name: email-automation-rules
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: email-automation
+  labels:
+    app.kubernetes.io/name: email-automation
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app.kubernetes.io/name: email-automation
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
