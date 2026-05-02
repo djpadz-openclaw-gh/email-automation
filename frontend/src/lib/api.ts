@@ -1,4 +1,5 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || 'http://localhost:8080';
+export const REGISTRATION_ENABLED = process.env.NEXT_PUBLIC_REGISTRATION_ENABLED !== 'false';
 
 export interface Rule {
   id: number;
@@ -70,6 +71,10 @@ export interface AuthUser {
   id: number;
   username: string;
   totp_enabled: boolean;
+}
+
+export interface ConfigResponse {
+  registration_enabled: boolean;
 }
 
 export interface AuthResponse {

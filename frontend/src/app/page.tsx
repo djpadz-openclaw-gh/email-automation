@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import api, { Rule, AuthResponse } from '@/lib/api';
+import { REGISTRATION_ENABLED } from '@/lib/api';
 import RuleEditor from '@/components/RuleEditor';
 import RuleList from '@/components/RuleList';
 import AccountList from '@/components/AccountList';
@@ -56,7 +57,7 @@ export default function Home() {
   };
 
   if (!token) {
-    if (authView === 'register') {
+    if (authView === 'register' && REGISTRATION_ENABLED) {
       return (
         <RegisterForm
           onComplete={handleLogin}
@@ -67,7 +68,7 @@ export default function Home() {
     return (
       <LoginForm
         onLogin={handleLogin}
-        onSwitchToRegister={() => setAuthView('register')}
+        onSwitchToRegister={REGISTRATION_ENABLED ? () => setAuthView('register') : undefined}
       />
     );
   }

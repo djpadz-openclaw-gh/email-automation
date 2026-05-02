@@ -5,7 +5,7 @@ import api, { AuthResponse, base64urlToBuffer } from '@/lib/api';
 
 interface LoginFormProps {
   onLogin: (response: AuthResponse) => void;
-  onSwitchToRegister: () => void;
+  onSwitchToRegister?: () => void;
 }
 
 export default function LoginForm({ onLogin, onSwitchToRegister }: LoginFormProps) {
@@ -217,14 +217,16 @@ export default function LoginForm({ onLogin, onSwitchToRegister }: LoginFormProp
           </form>
         )}
 
-        <div className="mt-6 text-center">
-          <button
-            onClick={onSwitchToRegister}
-            className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-          >
-            Don&apos;t have an account? Register
-          </button>
-        </div>
+        {onSwitchToRegister && (
+          <div className="mt-6 text-center">
+            <button
+              onClick={onSwitchToRegister}
+              className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Don&apos;t have an account? Register
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

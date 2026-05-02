@@ -37,6 +37,9 @@ type Config struct {
 	// Auth (legacy admin key)
 	APIKey string
 
+	// Registration
+	RegistrationEnabled bool
+
 	// JWT
 	JWTSecret     string
 	JWTExpiration time.Duration
@@ -76,6 +79,7 @@ func Load() *Config {
 		WebAuthnRPDisplayName: envStr("WEBAUTHN_RP_DISPLAY_NAME", "Email Automation"),
 		RateLimitWindow:   envDuration("RATE_LIMIT_WINDOW", 15*time.Minute),
 		RateLimitMaxFails: envInt("RATE_LIMIT_MAX_FAILS", 10),
+		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		LogJSON:           envBool("LOG_JSON", true),
 	}

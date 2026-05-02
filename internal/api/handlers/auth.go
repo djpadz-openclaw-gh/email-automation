@@ -92,6 +92,10 @@ func (h *AuthHandlers) generateTokenResponse(c *fiber.Ctx, user *models.User) er
 
 // Register handles POST /auth/register
 func (h *AuthHandlers) Register(c *fiber.Ctx) error {
+	if !h.Config.RegistrationEnabled {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "registration is currently disabled"})
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
