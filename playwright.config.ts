@@ -5,18 +5,13 @@ export default defineConfig({
   outputDir: './tests/e2e/results',
   timeout: 30000,
   use: {
-    baseURL: 'http://10.152.183.195:3000',
+    baseURL: 'http://localhost:18082',
+    connectOptions: {
+      wsEndpoint: 'http://127.0.0.1:18800',
+    },
     screenshot: 'on',
     trace: 'on-first-retry',
+    viewport: { width: 1280, height: 800 },
   },
-  projects: [
-    {
-      name: 'chromium',
-      use: {
-        browserName: 'chromium',
-        viewport: { width: 1280, height: 800 },
-      },
-    },
-  ],
   reporter: [['list'], ['html', { outputFolder: './tests/e2e/report', open: 'never' }]],
 });
