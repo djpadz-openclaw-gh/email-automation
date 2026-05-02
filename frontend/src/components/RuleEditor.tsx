@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import api, { Rule, EmailContext, RuleResult } from '@/lib/api';
+import { naturalLanguageToLua, luaToNaturalLanguage } from '@/lib/kiro';
 import ReferencePanel from '@/components/ReferencePanel';
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
@@ -59,6 +60,74 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const [testEmail, setTestEmail] = useState(JSON.stringify(DEFAULT_TEST_EMAIL, null, 2));
   const [showReference, setShowReference] = useState(false);
   const [showTest, setShowTest] = useState(false);
+
+  // Bidirectional editor state
+  const [naturalLanguage, setNaturalLanguage] = useState('');
+  const [translating, setTranslating] = useState<'nl2lua' | 'lua2nl' | null>(null);
+  const [translationError, setTranslationError] = useState('');
+  const nlDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const luaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lastEditSource, setLastEditSource] = useState<'nl' | 'lua' | null>(null);
+
+  // Translate natural language → Lua (debounced)
+  const translateNlToLua = useCallback((text: string) => {
+    if (nlDebounceRef.current) clearTimeout(nlDebounceRef.current);
+    if (!text.trim()) return;
+
+    nlDebounceRef.current = setTimeout(async () => {
+      try {
+        setTranslating('nl2lua');
+        setTranslationError('');
+        const code = await naturalLanguageToLua(text);
+        setLuaCode(code);
+      } catch (err) {
+        setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+      } finally {
+        setTranslating(null);
+      }
+    }, 500);
+  }, []);
+
+  // Translate Lua → natural language (debounced)
+  const translateLuaToNl = useCallback((code: string) => {
+    if (luaDebounceRef.current) clearTimeout(luaDebounceRef.current);
+    if (!code.trim()) return;
+
+    luaDebounceRef.current = setTimeout(async () => {
+      try {
+        setTranslating('lua2nl');
+        setTranslationError('');
+        const desc = await luaToNaturalLanguage(code);
+        setNaturalLanguage(desc);
+      } catch (err) {
+        setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+      } finally {
+        setTranslating(null);
+      }
+    }, 500);
+  }, []);
+
+  // Handle natural language changes
+  const handleNlChange = (text: string) => {
+    setNaturalLanguage(text);
+    setLastEditSource('nl');
+    translateNlToLua(text);
+  };
+
+  // Handle Lua code changes
+  const handleLuaChange = (code: string) => {
+    setLuaCode(code);
+    setLastEditSource('lua');
+    translateLuaToNl(code);
+  };
+
+  // Cleanup debounce timers
+  useEffect(() => {
+    return () => {
+      if (nlDebounceRef.current) clearTimeout(nlDebounceRef.current);
+      if (luaDebounceRef.current) clearTimeout(luaDebounceRef.current);
+    };
+  }, []);
 
   const handleValidate = async () => {
     try {
@@ -202,11 +271,62 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
             </div>
           </div>
 
+          {/* Natural Language Input */}
+          <div className="border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden mb-4">
+            <div className="bg-emerald-50 dark:bg-emerald-900/20 px-4 py-2 flex items-center justify-between border-b border-gray-200 dark:border-gray-700">
+              <span className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
+                💬 Natural Language
+              </span>
+              {translating === 'nl2lua' && (
+                <span className="text-xs text-emerald-600 dark:text-emerald-400 animate-pulse">
+                  Translating to Lua...
+                </span>
+              )}
+            </div>
+            <textarea
+              value={naturalLanguage}
+              onChange={(e) => handleNlChange(e.target.value)}
+              placeholder="Describe your rule in plain English, e.g.: &quot;Delete emails from noreply@example.com that are older than 24 hours and contain 'verification code' in the subject&quot;"
+              rows={3}
+              className="w-full px-4 py-3 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:outline-none resize-none"
+            />
+          </div>
+
+          {/* Translation sync indicator */}
+          <div className="flex items-center justify-center mb-4">
+            <div className="flex items-center gap-2 text-xs text-gray-400">
+              <span>💬 Natural Language</span>
+              <svg className={`w-4 h-4 ${translating ? 'animate-spin text-blue-500' : 'text-gray-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+              </svg>
+              <span>🔧 Lua Code</span>
+              {lastEditSource && (
+                <span className="ml-2 text-gray-300">
+                  (last edited: {lastEditSource === 'nl' ? 'natural language' : 'Lua'})
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Translation error */}
+          {translationError && (
+            <div className="mb-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-700 dark:text-amber-400 text-sm" role="alert">
+              ⚠️ Translation: {translationError}
+            </div>
+          )}
+
           {/* Monaco Editor */}
           <div className="border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden mb-4">
             <div className="bg-gray-100 dark:bg-gray-800 px-4 py-2 flex items-center justify-between border-b border-gray-200 dark:border-gray-700">
-              <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Lua Rule Code</span>
-              <div className="flex gap-2">
+              <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                🔧 Lua Rule Code
+              </span>
+              <div className="flex gap-2 items-center">
+                {translating === 'lua2nl' && (
+                  <span className="text-xs text-blue-600 dark:text-blue-400 animate-pulse">
+                    Translating to English...
+                  </span>
+                )}
                 <button
                   onClick={handleValidate}
                   className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-xs font-medium hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
@@ -230,7 +350,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
               language="lua"
               theme="vs-dark"
               value={luaCode}
-              onChange={(value) => setLuaCode(value || '')}
+              onChange={(value) => handleLuaChange(value || '')}
               options={{
                 minimap: { enabled: false },
                 fontSize: 14,

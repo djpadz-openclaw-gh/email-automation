@@ -403,3 +403,26 @@ func (db *DB) MarkDeferredActionDone(ctx context.Context, id int64, errMsg strin
 		`UPDATE deferred_actions SET executed = true, error = $2 WHERE id = $1`, id, errMsg)
 	return err
 }
+
+// --- Processed message operations ---
+
+func (db *DB) IsMessageProcessed(ctx context.Context, accountID int64, messageUID string) (bool, error) {
+	var count int
+	err := db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM processed_messages WHERE account_id = $1 AND message_uid = $2`,
+		accountID, messageUID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (db *DB) MarkMessageProcessed(ctx context.Context, accountID int64, messageUID string, ruleID int64, action string) error {
+	_, err := db.Pool.Exec(ctx,
+		`INSERT INTO processed_messages (account_id, message_uid, rule_id, action)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (account_id, message_uid) DO NOTHING`,
+		accountID, messageUID, ruleID, action)
+	return err
+}
