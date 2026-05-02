@@ -4,7 +4,7 @@
 
 set -e
 
-API_URL="http://localhost:18081"
+API_URL="http://localhost:18080"
 ADMIN_KEY="ea_45d384f375af77460856c9a50110463a2bb824ff8324b7ccc2594e6a48673a41"
 TENANT_KEY=""
 PASS=0
