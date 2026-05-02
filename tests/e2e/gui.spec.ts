@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 // Get a tenant API key from the running API
 async function getTenantApiKey(): Promise<string> {
   const adminKey = 'ea_45d384f375af77460856c9a50110463a2bb824ff8324b7ccc2594e6a48673a41';
-  const apiUrl = 'http://10.152.183.143:8080';
+  const apiUrl = 'http://api.email-automation.svc.cluster.local:8080';
   
   const response = await fetch(`${apiUrl}/admin/tenants`, {
     method: 'POST',

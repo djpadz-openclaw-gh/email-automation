@@ -5,13 +5,16 @@ export default defineConfig({
   outputDir: './tests/e2e/results',
   timeout: 30000,
   use: {
-    baseURL: 'http://localhost:18082',
-    connectOptions: {
-      wsEndpoint: 'http://127.0.0.1:18800',
-    },
+    baseURL: 'http://frontend.email-automation.svc.cluster.local:3000',
     screenshot: 'on',
     trace: 'on-first-retry',
     viewport: { width: 1280, height: 800 },
   },
+  projects: [
+    {
+      name: 'chromium',
+      use: { browserName: 'chromium' },
+    },
+  ],
   reporter: [['list'], ['html', { outputFolder: './tests/e2e/report', open: 'never' }]],
 });
