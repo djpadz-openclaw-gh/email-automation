@@ -38,6 +38,13 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 
+# Root node_modules (Playwright e2e)
+/node_modules/
+/package-lock.json
+
+# Playwright test results (regenerated each run)
+tests/e2e/results/
+
 # Database
 *.db
 *.sqlite

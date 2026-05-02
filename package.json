@@ -1,0 +1,27 @@
+{
+  "name": "email-automation",
+  "version": "1.0.0",
+  "description": "Lua-powered email rule engine with a Go backend, Next.js frontend, and Kubernetes deployment.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/djpadz-openclaw-gh/email-automation.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/djpadz-openclaw-gh/email-automation/issues"
+  },
+  "homepage": "https://github.com/djpadz-openclaw-gh/email-automation#readme",
+  "dependencies": {
+    "@playwright/test": "^1.59.1"
+  }
+}
