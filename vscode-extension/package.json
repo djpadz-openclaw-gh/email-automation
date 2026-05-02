@@ -1,0 +1,116 @@
+{
+  "name": "email-automation-lua",
+  "displayName": "Email Automation - Lua Rules",
+  "description": "VS Code extension for editing, validating, and testing Lua email automation rules",
+  "version": "0.1.0",
+  "publisher": "djpadz",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Snippets", "Linters"],
+  "activationEvents": [
+    "onLanguage:lua",
+    "workspaceContains:**/*.lua"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Email Automation",
+      "properties": {
+        "emailAutomation.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "URL of the Email Automation API server"
+        },
+        "emailAutomation.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authentication"
+        },
+        "emailAutomation.validateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate Lua rules on save"
+        },
+        "emailAutomation.validateOnType": {
+          "type": "boolean",
+          "default": false,
+          "description": "Validate Lua rules as you type (with debounce)"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "emailAutomation.validate",
+        "title": "Email Automation: Validate Rule",
+        "icon": "$(check)"
+      },
+      {
+        "command": "emailAutomation.test",
+        "title": "Email Automation: Test Rule",
+        "icon": "$(play)"
+      },
+      {
+        "command": "emailAutomation.testWithContext",
+        "title": "Email Automation: Test Rule with Custom Email Context",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "emailAutomation.pushRule",
+        "title": "Email Automation: Push Rule to Server"
+      },
+      {
+        "command": "emailAutomation.pullRules",
+        "title": "Email Automation: Pull Rules from Server"
+      },
+      {
+        "command": "emailAutomation.listRules",
+        "title": "Email Automation: List Server Rules"
+      },
+      {
+        "command": "emailAutomation.setApiKey",
+        "title": "Email Automation: Set API Key"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "emailAutomation.validate",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorLangId == lua"
+      },
+      {
+        "command": "emailAutomation.test",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorLangId == lua"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "lua",
+        "path": "./snippets/email-rules.json"
+      }
+    ],
+    "languages": [
+      {
+        "id": "lua",
+        "extensions": [".lua"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.3"
+  }
+}

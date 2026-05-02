@@ -1,0 +1,151 @@
+{
+  "Email Rule Template": {
+    "prefix": "rule",
+    "body": [
+      "-- Rule: ${1:Rule Name}",
+      "-- ${2:Description of what this rule does}",
+      "",
+      "local sender = email.sender_address:lower()",
+      "local subject = email.subject:lower()",
+      "",
+      "-- Match condition",
+      "if not contains(sender, \"${3:domain.com}\") then return skip() end",
+      "",
+      "-- Age check",
+      "if not older_than_hours(${4:24}) then return skip() end",
+      "",
+      "return ${5|move,delete,archive,keep,notify|}(${6:\"target\"}, \"${7:reason}\")"
+    ],
+    "description": "Basic email rule template"
+  },
+  "Rule with Keywords": {
+    "prefix": "rule-keywords",
+    "body": [
+      "-- Rule: ${1:Rule Name}",
+      "-- ${2:Description}",
+      "",
+      "local sender = email.sender_address:lower()",
+      "local subject = email.subject:lower()",
+      "",
+      "local domains = {",
+      "    \"${3:example.com}\",",
+      "}",
+      "",
+      "local keywords = {",
+      "    \"${4:keyword1}\", \"${5:keyword2}\",",
+      "}",
+      "",
+      "-- Check sender domain",
+      "local sender_match = false",
+      "for _, domain in ipairs(domains) do",
+      "    if sender:find(domain, 1, true) then",
+      "        sender_match = true",
+      "        break",
+      "    end",
+      "end",
+      "",
+      "if not sender_match then return skip() end",
+      "if not contains_any(subject, keywords) then return skip() end",
+      "",
+      "if not older_than_hours(${6:24}) then",
+      "    return keep(\"${7:Keeping until old enough}\")",
+      "end",
+      "",
+      "return ${8|move,delete,archive|}(\"${9:@Folder}\", \"${10:reason}\")"
+    ],
+    "description": "Email rule with domain and keyword matching"
+  },
+  "Deferred Action Rule": {
+    "prefix": "rule-defer",
+    "body": [
+      "-- Rule: ${1:Rule Name}",
+      "-- ${2:Description}",
+      "",
+      "local sender = email.sender_address:lower()",
+      "",
+      "if not contains(sender, \"${3:domain.com}\") then return skip() end",
+      "",
+      "-- Defer action: ${4|move_after,delete_after|}",
+      "return ${4}(${5:24}, \"${6:@Folder}\", \"${7:reason}\")"
+    ],
+    "description": "Rule with deferred action (move/delete after delay)"
+  },
+  "Skip Function": {
+    "prefix": "skip",
+    "body": "return skip()",
+    "description": "Skip this email (no action)"
+  },
+  "Move Action": {
+    "prefix": "move",
+    "body": "return move(\"${1:@Folder}\", \"${2:reason}\")",
+    "description": "Move email to folder"
+  },
+  "Delete Action": {
+    "prefix": "del",
+    "body": "return delete(\"${1:reason}\")",
+    "description": "Delete email"
+  },
+  "Archive Action": {
+    "prefix": "arch",
+    "body": "return archive(\"${1:reason}\")",
+    "description": "Archive email"
+  },
+  "Keep Action": {
+    "prefix": "keep",
+    "body": "return keep(\"${1:reason}\")",
+    "description": "Keep email in inbox (block further rules)"
+  },
+  "Notify Action": {
+    "prefix": "notif",
+    "body": "return notify(\"${1:message}\", \"${2:reason}\")",
+    "description": "Send notification about email"
+  },
+  "Move After Delay": {
+    "prefix": "moveafter",
+    "body": "return move_after(${1:24}, \"${2:@Folder}\", \"${3:reason}\")",
+    "description": "Move email after N hours"
+  },
+  "Delete After Delay": {
+    "prefix": "delafter",
+    "body": "return delete_after(${1:24}, \"${2:reason}\")",
+    "description": "Delete email after N hours"
+  },
+  "Domain Check": {
+    "prefix": "domcheck",
+    "body": [
+      "local sender = email.sender_address:lower()",
+      "if not contains(sender, \"${1:domain.com}\") then return skip() end"
+    ],
+    "description": "Check sender domain"
+  },
+  "Age Check": {
+    "prefix": "agecheck",
+    "body": "if not older_than_hours(${1:24}) then return skip() end",
+    "description": "Check if email is older than N hours"
+  },
+  "Contains Any Check": {
+    "prefix": "containsany",
+    "body": [
+      "local ${1:keywords} = {",
+      "    \"${2:word1}\", \"${3:word2}\",",
+      "}",
+      "if not contains_any(${4:subject}, ${1}) then return skip() end"
+    ],
+    "description": "Check if text contains any of the keywords"
+  },
+  "Attachment Check": {
+    "prefix": "attach",
+    "body": "if not email.has_attachments then return skip() end",
+    "description": "Check if email has attachments"
+  },
+  "ICS Calendar Check": {
+    "prefix": "ics",
+    "body": "if not has_ics() then return skip() end",
+    "description": "Check if email has calendar (.ics) attachment"
+  },
+  "Reply Check": {
+    "prefix": "isreply",
+    "body": "if is_reply() then return skip() end",
+    "description": "Skip if email is a reply"
+  }
+}
