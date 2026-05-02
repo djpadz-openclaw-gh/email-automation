@@ -66,15 +66,59 @@ export interface EmailContext {
   account_id: number;
 }
 
-class ApiClient {
-  private apiKey: string;
+export interface AuthUser {
+  id: number;
+  username: string;
+  totp_enabled: boolean;
+}
 
-  constructor(apiKey: string = '') {
-    this.apiKey = apiKey;
+export interface AuthResponse {
+  token: string;
+  expires_at: string;
+  user: AuthUser;
+}
+
+export interface PasskeyInfo {
+  id: number;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface APIKeyInfo {
+  id: number;
+  name: string;
+  prefix: string;
+  key?: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface TOTPSetupResponse {
+  secret: string;
+  url: string;
+  qr_code: string;
+}
+
+class ApiClient {
+  private token: string;
+  private onUnauthorized: (() => void) | null = null;
+
+  constructor(token: string = '') {
+    this.token = token;
   }
 
+  setToken(token: string) {
+    this.token = token;
+  }
+
+  // Legacy support
   setApiKey(key: string) {
-    this.apiKey = key;
+    this.token = key;
+  }
+
+  setOnUnauthorized(callback: () => void) {
+    this.onUnauthorized = callback;
   }
 
   private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -83,14 +127,19 @@ class ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    if (this.apiKey) {
-      headers['X-API-Key'] = this.apiKey;
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
     }
 
     const res = await fetch(`${API_URL}${path}`, {
       ...options,
       headers,
     });
+
+    if (res.status === 401 && this.onUnauthorized) {
+      this.onUnauthorized();
+      throw new Error('Session expired');
+    }
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -101,7 +150,152 @@ class ApiClient {
     return res.json();
   }
 
-  // Rules
+  // Send raw request (for WebAuthn where body is not JSON)
+  private async requestRaw<T>(path: string, body: string, method: string = 'POST'): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const res = await fetch(`${API_URL}${path}`, {
+      method,
+      headers,
+      body,
+    });
+
+    if (res.status === 401 && this.onUnauthorized) {
+      this.onUnauthorized();
+      throw new Error('Session expired');
+    }
+
+    if (!res.ok) {
+      const respBody = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(respBody.error || `API error: ${res.status}`);
+    }
+
+    return res.json();
+  }
+
+  // --- Auth ---
+  async register(username: string, password: string): Promise<AuthResponse> {
+    return this.request<AuthResponse>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+  }
+
+  async login(username: string, password: string, totpToken?: string): Promise<AuthResponse> {
+    return this.request<AuthResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, totp_token: totpToken }),
+    });
+  }
+
+  async logout(): Promise<void> {
+    await this.request('/auth/logout', { method: 'POST' });
+  }
+
+  async getProfile(): Promise<{ id: number; username: string; totp_enabled: boolean; passkey_count: number; created_at: string }> {
+    return this.request('/auth/profile');
+  }
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<{ message: string }> {
+    return this.request('/auth/password/change', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+  }
+
+  // --- TOTP ---
+  async totpSetup(): Promise<TOTPSetupResponse> {
+    return this.request<TOTPSetupResponse>('/auth/totp/setup', { method: 'POST' });
+  }
+
+  async totpVerify(totpToken: string): Promise<{ message: string }> {
+    return this.request('/auth/totp/verify', {
+      method: 'POST',
+      body: JSON.stringify({ totp_token: totpToken }),
+    });
+  }
+
+  async totpDisable(password: string): Promise<{ message: string }> {
+    return this.request('/auth/totp/disable', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+  }
+
+  // --- Passkeys ---
+  async passkeyRegisterBegin(): Promise<PublicKeyCredentialCreationOptions> {
+    return this.request('/auth/passkey/register/begin', { method: 'POST' });
+  }
+
+  async passkeyRegisterComplete(credential: PublicKeyCredential, name?: string): Promise<{ message: string; passkey: { id: number; name: string } }> {
+    const attestationResponse = credential.response as AuthenticatorAttestationResponse;
+    const body = JSON.stringify({
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        attestationObject: bufferToBase64url(attestationResponse.attestationObject),
+        clientDataJSON: bufferToBase64url(attestationResponse.clientDataJSON),
+      },
+    });
+    const queryParam = name ? `?name=${encodeURIComponent(name)}` : '';
+    return this.requestRaw(`/auth/passkey/register/complete${queryParam}`, body);
+  }
+
+  async passkeyAuthenticateBegin(username?: string): Promise<{ publicKey: PublicKeyCredentialRequestOptions; user_id?: number }> {
+    return this.request('/auth/passkey/authenticate/begin', {
+      method: 'POST',
+      body: JSON.stringify({ username: username || '' }),
+    });
+  }
+
+  async passkeyAuthenticateComplete(credential: PublicKeyCredential): Promise<AuthResponse> {
+    const assertionResponse = credential.response as AuthenticatorAssertionResponse;
+    const body = JSON.stringify({
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        authenticatorData: bufferToBase64url(assertionResponse.authenticatorData),
+        clientDataJSON: bufferToBase64url(assertionResponse.clientDataJSON),
+        signature: bufferToBase64url(assertionResponse.signature),
+        userHandle: assertionResponse.userHandle ? bufferToBase64url(assertionResponse.userHandle) : null,
+      },
+    });
+    return this.requestRaw('/auth/passkey/authenticate/complete', body);
+  }
+
+  async passkeyList(): Promise<PasskeyInfo[]> {
+    return this.request<PasskeyInfo[]>('/auth/passkey/list', { method: 'POST' });
+  }
+
+  async passkeyDelete(id: number): Promise<void> {
+    await this.request(`/auth/passkey/${id}`, { method: 'DELETE' });
+  }
+
+  // --- API Keys ---
+  async apiKeyCreate(name: string): Promise<APIKeyInfo & { key: string; message: string }> {
+    return this.request('/auth/apikeys', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async apiKeyList(): Promise<APIKeyInfo[]> {
+    return this.request<APIKeyInfo[]>('/auth/apikeys');
+  }
+
+  async apiKeyDelete(id: number): Promise<void> {
+    await this.request(`/auth/apikeys/${id}`, { method: 'DELETE' });
+  }
+
+  // --- Rules ---
   async listRules(): Promise<Rule[]> {
     return this.request<Rule[]>('/api/v1/rules');
   }
@@ -142,7 +336,7 @@ class ApiClient {
     });
   }
 
-  // Accounts
+  // --- Accounts ---
   async listAccounts(): Promise<Account[]> {
     return this.request<Account[]>('/api/v1/accounts');
   }
@@ -165,10 +359,33 @@ class ApiClient {
     await this.request(`/api/v1/accounts/${id}`, { method: 'DELETE' });
   }
 
-  // Logs
+  // --- Logs ---
   async listLogs(limit: number = 50): Promise<ExecutionLog[]> {
     return this.request<ExecutionLog[]>(`/api/v1/logs?limit=${limit}`);
   }
+}
+
+// --- WebAuthn helpers ---
+
+function bufferToBase64url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let str = '';
+  for (let i = 0; i < bytes.length; i++) {
+    str += String.fromCharCode(bytes[i]);
+  }
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+export function base64urlToBuffer(base64url: string): ArrayBuffer {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const padLen = (4 - (base64.length % 4)) % 4;
+  const padded = base64 + '='.repeat(padLen);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
 }
 
 export const api = new ApiClient();

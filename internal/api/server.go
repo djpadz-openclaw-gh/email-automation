@@ -3,13 +3,16 @@ package api
 import (
 	"fmt"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/rs/zerolog/log"
 
 	"github.com/djpadz/email-automation/internal/api/handlers"
 	"github.com/djpadz/email-automation/internal/api/middleware"
+	"github.com/djpadz/email-automation/internal/auth"
 	"github.com/djpadz/email-automation/internal/config"
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/engine"
@@ -21,6 +24,7 @@ type Server struct {
 	config *config.Config
 	db     *db.DB
 	engine *engine.Engine
+	jwt    *auth.JWTManager
 }
 
 // NewServer creates a new API server.
@@ -30,11 +34,14 @@ func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine) *Server 
 		ErrorHandler: errorHandler,
 	})
 
+	jwtMgr := auth.NewJWTManager(cfg.JWTSecret, cfg.JWTExpiration)
+
 	s := &Server{
 		app:    app,
 		config: cfg,
 		db:     database,
 		engine: eng,
+		jwt:    jwtMgr,
 	}
 
 	s.setupMiddleware()
@@ -60,6 +67,45 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/health", handlers.HealthCheck)
 	s.app.Get("/ready", handlers.ReadyCheck)
 
+	// --- Auth endpoints (no auth required for login/register) ---
+	var wan *webauthn.WebAuthn
+	var err error
+
+	wan, err = webauthn.New(&webauthn.Config{
+		RPDisplayName: s.config.WebAuthnRPDisplayName,
+		RPID:          s.config.WebAuthnRPID,
+		RPOrigins:     s.config.WebAuthnRPOrigins,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to initialize WebAuthn, passkey auth will be unavailable")
+	}
+
+	authH := handlers.NewAuthHandlers(s.db, s.jwt, wan, s.config)
+
+	authGroup := s.app.Group("/auth")
+	authGroup.Post("/register", authH.Register)
+	authGroup.Post("/login", authH.Login)
+	authGroup.Post("/logout", authH.Logout)
+
+	// Passkey auth (no auth required for begin/complete)
+	authGroup.Post("/passkey/authenticate/begin", authH.PasskeyAuthenticateBegin)
+	authGroup.Post("/passkey/authenticate/complete", authH.PasskeyAuthenticateComplete)
+
+	// Auth-required endpoints
+	authProtected := authGroup.Group("", middleware.JWTAuthMiddleware(s.db, s.jwt), middleware.RequireAuth())
+	authProtected.Get("/profile", authH.GetProfile)
+	authProtected.Post("/password/change", authH.ChangePassword)
+	authProtected.Post("/totp/setup", authH.TOTPSetup)
+	authProtected.Post("/totp/verify", authH.TOTPVerify)
+	authProtected.Post("/totp/disable", authH.TOTPDisable)
+	authProtected.Post("/passkey/register/begin", authH.PasskeyRegisterBegin)
+	authProtected.Post("/passkey/register/complete", authH.PasskeyRegisterComplete)
+	authProtected.Post("/passkey/list", authH.PasskeyList)
+	authProtected.Delete("/passkey/:id", authH.PasskeyDelete)
+	authProtected.Post("/apikeys", authH.APIKeyCreate)
+	authProtected.Get("/apikeys", authH.APIKeyList)
+	authProtected.Delete("/apikeys/:id", authH.APIKeyDelete)
+
 	// Admin endpoints (system API key)
 	admin := s.app.Group("/admin")
 	admin.Use(adminAuth(s.config.APIKey))
@@ -67,9 +113,9 @@ func (s *Server) setupRoutes() {
 	admin.Get("/tenants", tenantH.ListTenants)
 	admin.Post("/tenants", tenantH.CreateTenant)
 
-	// API v1 (tenant auth)
+	// API v1 (JWT + API key auth)
 	v1 := s.app.Group("/api/v1")
-	v1.Use(middleware.AuthMiddleware(s.db))
+	v1.Use(middleware.JWTAuthMiddleware(s.db, s.jwt))
 
 	// Rules
 	ruleH := &handlers.RuleHandlers{DB: s.db, Engine: s.engine}
