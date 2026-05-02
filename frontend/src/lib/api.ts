@@ -1,5 +1,4 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || 'http://localhost:8080';
-export const REGISTRATION_ENABLED = process.env.NEXT_PUBLIC_REGISTRATION_ENABLED !== 'false';
 
 export interface Rule {
   id: number;
@@ -182,6 +181,11 @@ class ApiClient {
     }
 
     return res.json();
+  }
+
+  // --- Config ---
+  async getConfig(): Promise<ConfigResponse> {
+    return this.request<ConfigResponse>('/config', { method: 'GET' });
   }
 
   // --- Auth ---

@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import api, { Rule, AuthResponse } from '@/lib/api';
-import { REGISTRATION_ENABLED } from '@/lib/api';
 import RuleEditor from '@/components/RuleEditor';
 import RuleList from '@/components/RuleList';
 import AccountList from '@/components/AccountList';
@@ -21,6 +20,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>('rules');
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(true);
 
   useEffect(() => {
     const stored = localStorage.getItem('ea_token');
@@ -34,6 +34,15 @@ export default function Home() {
     // Handle 401 responses
     api.setOnUnauthorized(() => {
       handleLogout();
+    });
+
+    // Fetch config to check if registration is enabled
+    api.getConfig().then(config => {
+      setRegistrationEnabled(config.registration_enabled);
+    }).catch(err => {
+      console.error('Failed to fetch config:', err);
+      // Default to true if fetch fails
+      setRegistrationEnabled(true);
     });
   }, []);
 
@@ -57,7 +66,7 @@ export default function Home() {
   };
 
   if (!token) {
-    if (authView === 'register' && REGISTRATION_ENABLED) {
+    if (authView === 'register' && registrationEnabled) {
       return (
         <RegisterForm
           onComplete={handleLogin}
@@ -68,7 +77,7 @@ export default function Home() {
     return (
       <LoginForm
         onLogin={handleLogin}
-        onSwitchToRegister={REGISTRATION_ENABLED ? () => setAuthView('register') : undefined}
+        onSwitchToRegister={registrationEnabled ? () => setAuthView('register') : undefined}
       />
     );
   }

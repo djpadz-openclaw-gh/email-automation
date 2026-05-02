@@ -67,6 +67,13 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/health", handlers.HealthCheck)
 	s.app.Get("/ready", handlers.ReadyCheck)
 
+	// Config endpoint (no auth)
+	s.app.Get("/config", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"registration_enabled": s.config.RegistrationEnabled,
+		})
+	})
+
 	// --- Auth endpoints (no auth required for login/register) ---
 	var wan *webauthn.WebAuthn
 	var err error
