@@ -298,10 +298,12 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 
 	log.Info().Int64("user_id", user.ID).Str("username", user.Username).Int("num_credentials", len(credentials)).Msg("validating passkey login")
 
-	// Try user-specific session first, then discoverable
+	// Always use user-specific session key, even for discoverable login
+	// This ensures the session user ID matches the credential assertion user ID
 	sessionKey := fmt.Sprintf("auth_%d", user.ID)
 	session, ok := h.getSession(sessionKey)
 	if !ok {
+		// Try discoverable session as fallback
 		discoverableSession, ok := h.getSession("auth_discoverable")
 		if !ok {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no authentication in progress"})
