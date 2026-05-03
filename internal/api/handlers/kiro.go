@@ -161,7 +161,7 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", h.Config.KiroAPIURL, bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", h.Config.KiroAPIURL+"/v1/messages", bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
