@@ -202,7 +202,15 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return apiResp.Content[0].Text, nil
+	// Find the text block (skip thinking blocks)
+	for _, block := range apiResp.Content {
+		if block.Type == "text" && block.Text != "" {
+			return block.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no text content in API response")
+
 }
 
 // TranslateEnglishToLua handles POST /api/kiro/translate/english-to-lua
