@@ -42,6 +42,14 @@ spec:
               value: "5m"
             - name: SCHEDULER_INTERVAL
               value: "30s"
+            - name: REGISTRATION_ENABLED
+              value: "true"
+            - name: WEBAUTHN_RP_ID
+              value: "email-automation.oc.ctb.padz.net"
+            - name: WEBAUTHN_RP_ORIGINS
+              value: "https://email-automation.oc.ctb.padz.net"
+            - name: WEBAUTHN_RP_DISPLAY_NAME
+              value: "Email Automation"
           envFrom:
             - secretRef:
                 name: email-automation-secrets
