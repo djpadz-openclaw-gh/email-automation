@@ -63,16 +63,16 @@ func (db *DB) UpdateUserTOTP(ctx context.Context, userID int64, secret *string, 
 func (db *DB) CreatePasskey(ctx context.Context, p *models.Passkey) error {
 	transportsJSON, _ := json.Marshal(p.Transports)
 	return db.Pool.QueryRow(ctx,
-		`INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, transports, name)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, transports, backup_eligible, backup_state, name)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, created_at`,
-		p.UserID, p.CredentialID, p.PublicKey, p.SignCount, string(transportsJSON), p.Name,
+		p.UserID, p.CredentialID, p.PublicKey, p.SignCount, string(transportsJSON), p.BackupEligible, p.BackupState, p.Name,
 	).Scan(&p.ID, &p.CreatedAt)
 }
 
 func (db *DB) GetPasskeysByUserID(ctx context.Context, userID int64) ([]models.Passkey, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, user_id, credential_id, public_key, sign_count, transports, name, created_at, last_used_at
+		`SELECT id, user_id, credential_id, public_key, sign_count, transports, backup_eligible, backup_state, name, created_at, last_used_at
 		 FROM passkeys WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, err
@@ -83,7 +83,7 @@ func (db *DB) GetPasskeysByUserID(ctx context.Context, userID int64) ([]models.P
 	for rows.Next() {
 		var p models.Passkey
 		var transportsJSON string
-		if err := rows.Scan(&p.ID, &p.UserID, &p.CredentialID, &p.PublicKey, &p.SignCount, &transportsJSON, &p.Name, &p.CreatedAt, &p.LastUsedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.CredentialID, &p.PublicKey, &p.SignCount, &transportsJSON, &p.BackupEligible, &p.BackupState, &p.Name, &p.CreatedAt, &p.LastUsedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(transportsJSON), &p.Transports)
@@ -96,9 +96,9 @@ func (db *DB) GetPasskeyByCredentialID(ctx context.Context, credentialID string)
 	p := &models.Passkey{}
 	var transportsJSON string
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, user_id, credential_id, public_key, sign_count, transports, name, created_at, last_used_at
+		`SELECT id, user_id, credential_id, public_key, sign_count, transports, backup_eligible, backup_state, name, created_at, last_used_at
 		 FROM passkeys WHERE credential_id = $1`, credentialID,
-	).Scan(&p.ID, &p.UserID, &p.CredentialID, &p.PublicKey, &p.SignCount, &transportsJSON, &p.Name, &p.CreatedAt, &p.LastUsedAt)
+	).Scan(&p.ID, &p.UserID, &p.CredentialID, &p.PublicKey, &p.SignCount, &transportsJSON, &p.BackupEligible, &p.BackupState, &p.Name, &p.CreatedAt, &p.LastUsedAt)
 	if err != nil {
 		return nil, err
 	}

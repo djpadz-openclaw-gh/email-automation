@@ -17,15 +17,17 @@ type User struct {
 
 // Passkey represents a WebAuthn credential.
 type Passkey struct {
-	ID           int64      `json:"id"`
-	UserID       int64      `json:"user_id"`
-	CredentialID string     `json:"credential_id"`
-	PublicKey    string     `json:"public_key"`
-	SignCount    uint32     `json:"sign_count"`
-	Transports   []string   `json:"transports"`
-	Name         string     `json:"name"`
-	CreatedAt    time.Time  `json:"created_at"`
-	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	ID              int64      `json:"id"`
+	UserID          int64      `json:"user_id"`
+	CredentialID    string     `json:"credential_id"`
+	PublicKey       string     `json:"public_key"`
+	SignCount       uint32     `json:"sign_count"`
+	Transports      []string   `json:"transports"`
+	BackupEligible  bool       `json:"backup_eligible"`
+	BackupState     bool       `json:"backup_state"`
+	Name            string     `json:"name"`
+	CreatedAt       time.Time  `json:"created_at"`
+	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
 }
 
 // APIKey represents a programmatic access key.

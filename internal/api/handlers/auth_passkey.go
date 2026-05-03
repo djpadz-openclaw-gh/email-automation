@@ -34,11 +34,13 @@ func (h *AuthHandlers) PasskeyRegisterBegin(c *fiber.Ctx) error {
 	var credentials []webauthn.Credential
 	for _, p := range existingPasskeys {
 		record := &internalAuth.PasskeyRecord{
-			CredentialID: p.CredentialID,
-			PublicKey:    p.PublicKey,
-			SignCount:    p.SignCount,
-			Transports:   p.Transports,
-		}
+			CredentialID:   p.CredentialID,
+			PublicKey:       p.PublicKey,
+			SignCount:       p.SignCount,
+			Transports:      p.Transports,
+			BackupEligible:  p.BackupEligible,
+			BackupState:     p.BackupState,
+			}
 		cred, err := record.ToWebAuthnCredential()
 		if err != nil {
 			continue
@@ -97,11 +99,13 @@ func (h *AuthHandlers) PasskeyRegisterComplete(c *fiber.Ctx) error {
 	var credentials []webauthn.Credential
 	for _, p := range existingPasskeys {
 		record := &internalAuth.PasskeyRecord{
-			CredentialID: p.CredentialID,
-			PublicKey:    p.PublicKey,
-			SignCount:    p.SignCount,
-			Transports:   p.Transports,
-		}
+			CredentialID:   p.CredentialID,
+			PublicKey:       p.PublicKey,
+			SignCount:       p.SignCount,
+			Transports:      p.Transports,
+			BackupEligible:  p.BackupEligible,
+			BackupState:     p.BackupState,
+			}
 		cred, err := record.ToWebAuthnCredential()
 		if err != nil {
 			continue
@@ -155,12 +159,14 @@ func (h *AuthHandlers) PasskeyRegisterComplete(c *fiber.Ctx) error {
 	}
 
 	passkey := &models.Passkey{
-		UserID:       userID,
-		CredentialID: base64.RawURLEncoding.EncodeToString(credential.ID),
-		PublicKey:    base64.RawURLEncoding.EncodeToString(credential.PublicKey),
-		SignCount:    credential.Authenticator.SignCount,
-		Transports:   transports,
-		Name:         name,
+		UserID:         userID,
+		CredentialID:   base64.RawURLEncoding.EncodeToString(credential.ID),
+		PublicKey:      base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+		SignCount:      credential.Authenticator.SignCount,
+		Transports:     transports,
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
+		Name:           name,
 	}
 
 	if err := h.DB.CreatePasskey(c.Context(), passkey); err != nil {
@@ -206,11 +212,13 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 		var credentials []webauthn.Credential
 		for _, p := range passkeys {
 			record := &internalAuth.PasskeyRecord{
-				CredentialID: p.CredentialID,
-				PublicKey:    p.PublicKey,
-				SignCount:    p.SignCount,
-				Transports:   p.Transports,
-			}
+				CredentialID:   p.CredentialID,
+				PublicKey:       p.PublicKey,
+				SignCount:       p.SignCount,
+				Transports:      p.Transports,
+				BackupEligible:  p.BackupEligible,
+				BackupState:     p.BackupState,
+				}
 			cred, err := record.ToWebAuthnCredential()
 			if err != nil {
 				continue
@@ -285,11 +293,13 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 	var credentials []webauthn.Credential
 	for _, p := range passkeys {
 		record := &internalAuth.PasskeyRecord{
-			CredentialID: p.CredentialID,
-			PublicKey:    p.PublicKey,
-			SignCount:    p.SignCount,
-			Transports:   p.Transports,
-		}
+			CredentialID:   p.CredentialID,
+			PublicKey:       p.PublicKey,
+			SignCount:       p.SignCount,
+			Transports:      p.Transports,
+			BackupEligible:  p.BackupEligible,
+			BackupState:     p.BackupState,
+			}
 		cred, err := record.ToWebAuthnCredential()
 		if err != nil {
 			continue
@@ -354,11 +364,13 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 		var creds []webauthn.Credential
 		for _, p := range lookupPasskeys {
 			record := &internalAuth.PasskeyRecord{
-				CredentialID: p.CredentialID,
-				PublicKey:    p.PublicKey,
-				SignCount:    p.SignCount,
-				Transports:   p.Transports,
-			}
+				CredentialID:   p.CredentialID,
+				PublicKey:       p.PublicKey,
+				SignCount:       p.SignCount,
+				Transports:      p.Transports,
+				BackupEligible:  p.BackupEligible,
+				BackupState:     p.BackupState,
+				}
 			cred, err := record.ToWebAuthnCredential()
 			if err != nil {
 				continue
@@ -503,11 +515,13 @@ func (h *AuthHandlers) PasskeyEnrollBegin(c *fiber.Ctx) error {
 	var credentials []webauthn.Credential
 	for _, p := range existingPasskeys {
 		record := &internalAuth.PasskeyRecord{
-			CredentialID: p.CredentialID,
-			PublicKey:    p.PublicKey,
-			SignCount:    p.SignCount,
-			Transports:   p.Transports,
-		}
+			CredentialID:   p.CredentialID,
+			PublicKey:       p.PublicKey,
+			SignCount:       p.SignCount,
+			Transports:      p.Transports,
+			BackupEligible:  p.BackupEligible,
+			BackupState:     p.BackupState,
+			}
 		cred, err := record.ToWebAuthnCredential()
 		if err != nil {
 			continue
@@ -581,11 +595,13 @@ func (h *AuthHandlers) PasskeyEnrollFinish(c *fiber.Ctx) error {
 	var credentials []webauthn.Credential
 	for _, p := range existingPasskeys {
 		record := &internalAuth.PasskeyRecord{
-			CredentialID: p.CredentialID,
-			PublicKey:    p.PublicKey,
-			SignCount:    p.SignCount,
-			Transports:   p.Transports,
-		}
+			CredentialID:   p.CredentialID,
+			PublicKey:       p.PublicKey,
+			SignCount:       p.SignCount,
+			Transports:      p.Transports,
+			BackupEligible:  p.BackupEligible,
+			BackupState:     p.BackupState,
+			}
 		cred, err := record.ToWebAuthnCredential()
 		if err != nil {
 			continue
@@ -624,12 +640,14 @@ func (h *AuthHandlers) PasskeyEnrollFinish(c *fiber.Ctx) error {
 	}
 
 	passkey := &models.Passkey{
-		UserID:       user.ID,
-		CredentialID: base64.RawURLEncoding.EncodeToString(credential.ID),
-		PublicKey:    base64.RawURLEncoding.EncodeToString(credential.PublicKey),
-		SignCount:    credential.Authenticator.SignCount,
-		Transports:   transports,
-		Name:         fmt.Sprintf("Passkey %d", len(existingPasskeys)+1),
+		UserID:         user.ID,
+		CredentialID:   base64.RawURLEncoding.EncodeToString(credential.ID),
+		PublicKey:      base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+		SignCount:      credential.Authenticator.SignCount,
+		Transports:     transports,
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
+		Name:           fmt.Sprintf("Passkey %d", len(existingPasskeys)+1),
 	}
 
 	if err := h.DB.CreatePasskey(c.Context(), passkey); err != nil {

@@ -53,15 +53,17 @@ func (u *WebAuthnUser) WebAuthnIcon() string {
 
 // PasskeyRecord represents a stored passkey in the database.
 type PasskeyRecord struct {
-	ID           int64    `json:"id"`
-	UserID       int64    `json:"user_id"`
-	CredentialID string   `json:"credential_id"` // base64
-	PublicKey    string   `json:"public_key"`     // base64
-	SignCount    uint32   `json:"sign_count"`
-	Transports   []string `json:"transports"`
-	Name         string   `json:"name"`
-	CreatedAt    string   `json:"created_at"`
-	LastUsedAt   *string  `json:"last_used_at,omitempty"`
+	ID              int64    `json:"id"`
+	UserID          int64    `json:"user_id"`
+	CredentialID    string   `json:"credential_id"` // base64
+	PublicKey       string   `json:"public_key"`     // base64
+	SignCount       uint32   `json:"sign_count"`
+	Transports      []string `json:"transports"`
+	BackupEligible  bool     `json:"backup_eligible"`
+	BackupState     bool     `json:"backup_state"`
+	Name            string   `json:"name"`
+	CreatedAt       string   `json:"created_at"`
+	LastUsedAt      *string  `json:"last_used_at,omitempty"`
 }
 
 // ToWebAuthnCredential converts a PasskeyRecord to a webauthn.Credential.
@@ -93,6 +95,12 @@ func (p *PasskeyRecord) ToWebAuthnCredential() (webauthn.Credential, error) {
 		PublicKey:       pubKey,
 		AttestationType: "none",
 		Transport:       transports,
+		Flags: webauthn.CredentialFlags{
+			UserPresent:    true,
+			UserVerified:   true,
+			BackupEligible: p.BackupEligible,
+			BackupState:    p.BackupState,
+		},
 		Authenticator: webauthn.Authenticator{
 			SignCount: p.SignCount,
 		},
