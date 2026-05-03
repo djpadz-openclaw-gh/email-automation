@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 
@@ -114,10 +115,19 @@ func (h *AuthHandlers) PasskeyRegisterComplete(c *fiber.Ctx) error {
 	}
 
 	// Parse the response body
-	parsedResponse, err := protocol.ParseCredentialCreationResponseBody(c.Request().BodyStream())
+	// NOTE: Use bytes.NewReader(c.Body()) instead of c.Request().BodyStream().
+	// In Fiber/fasthttp, BodyStream() returns nil when the body is buffered in memory
+	// (the default for small bodies), which causes a nil pointer dereference panic
+	// inside json.NewDecoder(nil).Decode().
+	parsedResponse, err := protocol.ParseCredentialCreationResponseBody(bytes.NewReader(c.Body()))
 	if err != nil {
 		log.Error().Err(err).Msg("failed to parse credential creation response")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid attestation response"})
+	}
+
+	if h.WebAuthn == nil {
+		log.Error().Msg("WebAuthn is nil - initialization failed")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "passkey registration not available"})
 	}
 
 	credential, err := h.WebAuthn.CreateCredential(wanUser, *session, parsedResponse)
@@ -240,7 +250,8 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 
 // PasskeyAuthenticateComplete handles POST /auth/passkey/authenticate/complete
 func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
-	parsedResponse, err := protocol.ParseCredentialRequestResponseBody(c.Request().BodyStream())
+	// NOTE: Use bytes.NewReader(c.Body()) — see PasskeyRegisterComplete for explanation.
+	parsedResponse, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(c.Body()))
 	if err != nil {
 		log.Error().Err(err).Msg("failed to parse credential request response")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid assertion response"})
