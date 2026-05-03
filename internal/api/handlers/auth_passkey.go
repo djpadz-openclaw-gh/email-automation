@@ -429,6 +429,7 @@ func (h *AuthHandlers) PasskeyDelete(c *fiber.Ctx) error {
 func (h *AuthHandlers) RegisterUserWithPasskey(c *fiber.Ctx) error {
 	var req struct {
 		Username string `json:"username"`
+		Password string `json:"password"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -445,9 +446,20 @@ func (h *AuthHandlers) RegisterUserWithPasskey(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "username already exists"})
 	}
 
+	// Hash password if provided
+	var passwordHash string
+	if req.Password != "" {
+		passwordHash, err = internalAuth.HashPassword(req.Password)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to hash password")
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create user"})
+		}
+	}
+
 	// Create new user
 	user := &models.User{
-		Username: req.Username,
+		Username:     req.Username,
+		PasswordHash: passwordHash,
 	}
 
 	if err := h.DB.CreateUser(c.Context(), user); err != nil {
