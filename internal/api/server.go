@@ -118,6 +118,12 @@ func (s *Server) setupRoutes() {
 	authProtected.Get("/apikeys", authH.APIKeyList)
 	authProtected.Delete("/apikeys/:id", authH.APIKeyDelete)
 
+	// Kiro AI translation endpoints (no auth required)
+	kiroH := handlers.NewKiroHandlers(s.config)
+	kiro := s.app.Group("/api/kiro")
+	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
+	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
+
 	// Admin endpoints (system API key)
 	admin := s.app.Group("/admin")
 	admin.Use(adminAuth(s.config.APIKey))

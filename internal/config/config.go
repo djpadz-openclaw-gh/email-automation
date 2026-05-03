@@ -49,6 +49,10 @@ type Config struct {
 	WebAuthnRPDisplayName string
 	WebAuthnRPOrigins     []string
 
+	// Kiro API (AI translation)
+	KiroAPIKey string
+	KiroAPIURL string
+
 	// Rate limiting
 	RateLimitWindow   time.Duration
 	RateLimitMaxFails int
@@ -79,6 +83,8 @@ func Load() *Config {
 		WebAuthnRPDisplayName: envStr("WEBAUTHN_RP_DISPLAY_NAME", "Email Automation"),
 		RateLimitWindow:   envDuration("RATE_LIMIT_WINDOW", 15*time.Minute),
 		RateLimitMaxFails: envInt("RATE_LIMIT_MAX_FAILS", 10),
+		KiroAPIKey:          envStr("KIRO_API_KEY", ""),
+		KiroAPIURL:          envStr("KIRO_API_URL", "https://api.anthropic.com/v1/messages"),
 		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		LogJSON:           envBool("LOG_JSON", true),
