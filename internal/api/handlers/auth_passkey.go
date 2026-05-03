@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -187,13 +188,9 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 	if req.Username != "" {
 		user, err := h.DB.GetUserByUsername(c.Context(), req.Username)
 		if err != nil {
-			// Don't reveal whether user exists - return generic options with dummy user
-			dummyUser := &internalAuth.WebAuthnUser{
-				ID:          0,
-				Username:    "dummy",
-				Credentials: []webauthn.Credential{},
-			}
-			options, session, err := h.WebAuthn.BeginLogin(dummyUser)
+			// Don't reveal whether user exists — use discoverable login as fallback
+			// so the response shape is indistinguishable from a real user
+			options, session, err := h.WebAuthn.BeginDiscoverableLogin()
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to begin authentication"})
 			}
@@ -243,17 +240,11 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 	}
 
 	// Discoverable login (no username)
-	// We can't use BeginDiscoverableLogin() because it creates a session without a user ID,
-	// but we need to validate with a specific user ID later. Instead, we use BeginLogin()
-	// with a dummy user that has ID 0. During authentication, we'll look up the real user
-	// from the credential ID and verify the credential belongs to that user.
-	dummyUser := &internalAuth.WebAuthnUser{
-		ID:          0, // Special ID for discoverable login
-		Username:    "discoverable",
-		Credentials: []webauthn.Credential{},
-	}
-
-	options, session, err := h.WebAuthn.BeginLogin(dummyUser)
+	// BeginDiscoverableLogin() creates a session with UserID = nil, which is required
+	// by ValidateDiscoverableLogin(). The user is looked up during the complete step
+	// via a DiscoverableUserHandler callback that decodes the userHandle from the
+	// authenticator response.
+	options, session, err := h.WebAuthn.BeginDiscoverableLogin()
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin discoverable login")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to begin authentication"})
@@ -272,7 +263,8 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid assertion response"})
 	}
 
-	// Try to find the credential in our database
+	// Try user-specific session first (set when username was provided at begin)
+	// Then fall back to discoverable session (set when no username was provided)
 	credentialID := base64.RawURLEncoding.EncodeToString(parsedResponse.RawID)
 	dbPasskey, err := h.DB.GetPasskeyByCredentialID(c.Context(), credentialID)
 	if err != nil {
@@ -313,32 +305,81 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 
 	log.Info().Int64("user_id", user.ID).Str("username", user.Username).Int("num_credentials", len(credentials)).Msg("validating passkey login")
 
-	// Try user-specific session first, then discoverable
+	// Try user-specific session first
 	sessionKey := fmt.Sprintf("auth_%d", user.ID)
 	session, ok := h.getSession(sessionKey)
-	if !ok {
-		// Try discoverable session as fallback
-		discoverableSession, ok := h.getSession("auth_discoverable")
-		if !ok {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no authentication in progress"})
-		}
-		session = discoverableSession
-		log.Info().Msg("using discoverable login session")
-		defer h.deleteSession("auth_discoverable")
-	} else {
+	if ok {
+		// User-specific session found — use ValidateLogin which expects session.UserID to match
 		log.Info().Str("session_key", sessionKey).Msg("using user-specific login session")
 		defer h.deleteSession(sessionKey)
+
+		credential, err := h.WebAuthn.ValidateLogin(wanUser, *session, parsedResponse)
+		if err != nil {
+			log.Error().Err(err).Int64("user_id", user.ID).Msg("failed to validate user-specific passkey login")
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication failed"})
+		}
+
+		_ = h.DB.UpdatePasskeySignCount(c.Context(), dbPasskey.ID, credential.Authenticator.SignCount)
+		return h.generateTokenResponse(c, user)
 	}
 
-	credential, err := h.WebAuthn.ValidateLogin(wanUser, *session, parsedResponse)
+	// Try discoverable session — use ValidateDiscoverableLogin which expects session.UserID == nil
+	discoverableSession, ok := h.getSession("auth_discoverable")
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no authentication in progress"})
+	}
+	log.Info().Msg("using discoverable login session with ValidateDiscoverableLogin")
+	defer h.deleteSession("auth_discoverable")
+
+	// DiscoverableUserHandler: called by the library to look up the user from the assertion.
+	// rawID is the credential ID bytes, userHandle is the user ID bytes (big-endian encoded
+	// by WebAuthnID() during registration).
+	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+		if len(userHandle) < 8 {
+			return nil, fmt.Errorf("invalid user handle length: %d", len(userHandle))
+		}
+		uid := int64(binary.BigEndian.Uint64(userHandle))
+		log.Info().Int64("decoded_user_id", uid).Msg("discoverable login: decoded user handle")
+
+		lookupUser, err := h.DB.GetUserByID(c.Context(), uid)
+		if err != nil {
+			return nil, fmt.Errorf("user not found for handle: %w", err)
+		}
+
+		lookupPasskeys, err := h.DB.GetPasskeysByUserID(c.Context(), lookupUser.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get passkeys: %w", err)
+		}
+
+		var creds []webauthn.Credential
+		for _, p := range lookupPasskeys {
+			record := &internalAuth.PasskeyRecord{
+				CredentialID: p.CredentialID,
+				PublicKey:    p.PublicKey,
+				SignCount:    p.SignCount,
+				Transports:   p.Transports,
+			}
+			cred, err := record.ToWebAuthnCredential()
+			if err != nil {
+				continue
+			}
+			creds = append(creds, cred)
+		}
+
+		return &internalAuth.WebAuthnUser{
+			ID:          lookupUser.ID,
+			Username:    lookupUser.Username,
+			Credentials: creds,
+		}, nil
+	}
+
+	credential, err := h.WebAuthn.ValidateDiscoverableLogin(handler, *discoverableSession, parsedResponse)
 	if err != nil {
-		log.Error().Err(err).Int64("user_id", user.ID).Str("session_key", sessionKey).Msg("failed to validate passkey login")
+		log.Error().Err(err).Int64("user_id", user.ID).Msg("failed to validate discoverable passkey login")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	// Update sign count
 	_ = h.DB.UpdatePasskeySignCount(c.Context(), dbPasskey.ID, credential.Authenticator.SignCount)
-
 	return h.generateTokenResponse(c, user)
 }
 
