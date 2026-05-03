@@ -21,7 +21,7 @@ spec:
       serviceAccountName: email-automation
       containers:
         - name: api
-          image: registry.container-registry.svc.cluster.local:32000/email-automation-api:latest
+          image: registry.container-registry.svc.cluster.local:32000/email-automation:latest
           ports:
             - containerPort: 8080
               name: http
