@@ -183,12 +183,17 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 	}
 	_ = c.BodyParser(&req)
 
-	// If username provided, do user-specific auth; otherwise discoverable credential
+	// If username provided, do user-specific auth
 	if req.Username != "" {
 		user, err := h.DB.GetUserByUsername(c.Context(), req.Username)
 		if err != nil {
-			// Don't reveal whether user exists - return generic options
-			options, session, err := h.WebAuthn.BeginDiscoverableLogin()
+			// Don't reveal whether user exists - return generic options with dummy user
+			dummyUser := &internalAuth.WebAuthnUser{
+				ID:          0,
+				Username:    "dummy",
+				Credentials: []webauthn.Credential{},
+			}
+			options, session, err := h.WebAuthn.BeginLogin(dummyUser)
 			if err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to begin authentication"})
 			}
@@ -238,7 +243,17 @@ func (h *AuthHandlers) PasskeyAuthenticateBegin(c *fiber.Ctx) error {
 	}
 
 	// Discoverable login (no username)
-	options, session, err := h.WebAuthn.BeginDiscoverableLogin()
+	// We can't use BeginDiscoverableLogin() because it creates a session without a user ID,
+	// but we need to validate with a specific user ID later. Instead, we use BeginLogin()
+	// with a dummy user that has ID 0. During authentication, we'll look up the real user
+	// from the credential ID and verify the credential belongs to that user.
+	dummyUser := &internalAuth.WebAuthnUser{
+		ID:          0, // Special ID for discoverable login
+		Username:    "discoverable",
+		Credentials: []webauthn.Credential{},
+	}
+
+	options, session, err := h.WebAuthn.BeginLogin(dummyUser)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to begin discoverable login")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to begin authentication"})
@@ -298,8 +313,7 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 
 	log.Info().Int64("user_id", user.ID).Str("username", user.Username).Int("num_credentials", len(credentials)).Msg("validating passkey login")
 
-	// Always use user-specific session key, even for discoverable login
-	// This ensures the session user ID matches the credential assertion user ID
+	// Try user-specific session first, then discoverable
 	sessionKey := fmt.Sprintf("auth_%d", user.ID)
 	session, ok := h.getSession(sessionKey)
 	if !ok {
