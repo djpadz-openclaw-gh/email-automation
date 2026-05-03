@@ -235,6 +235,71 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 	return c.JSON(englishToLuaResponse{LuaCode: luaCode})
 }
 
+// KiroProxyRequest is the request body for the generic Kiro proxy endpoint.
+type KiroProxyRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	Messages  []anthropicMessage `json:"messages"`
+}
+
+// KiroProxy handles POST /api/kiro (generic proxy to Kiro gateway)
+func (h *KiroHandlers) KiroProxy(c *fiber.Ctx) error {
+	var req KiroProxyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	if req.Model == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "model is required"})
+	}
+
+	if len(req.Messages) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "messages are required"})
+	}
+
+	reqBody := anthropicRequest{
+		Model:     req.Model,
+		MaxTokens: req.MaxTokens,
+		Messages:  req.Messages,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to marshal request"})
+	}
+
+	req2, err := http.NewRequest("POST", h.Config.KiroAPIURL+"/v1/messages", bytes.NewReader(jsonBody))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create request"})
+	}
+
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("x-api-key", h.Config.KiroAPIKey)
+	req2.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := h.client.Do(req2)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API request failed"})
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read response"})
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Error().
+			Int("status", resp.StatusCode).
+			Str("body", string(body)).
+			Msg("Kiro API returned non-200 status")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API returned status " + fmt.Sprint(resp.StatusCode)})
+	}
+
+	// Return the raw response from Kiro API
+	return c.Status(fiber.StatusOK).Send(body)
+}
+
 // TranslateLuaToEnglish handles POST /api/kiro/translate/lua-to-english
 func (h *KiroHandlers) TranslateLuaToEnglish(c *fiber.Ctx) error {
 	var req luaToEnglishRequest

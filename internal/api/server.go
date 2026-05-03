@@ -122,6 +122,7 @@ func (s *Server) setupRoutes() {
 	kiroH := handlers.NewKiroHandlers(s.config)
 	s.app.Post("/api/kiro", kiroH.Proxy)
 	kiro := s.app.Group("/api/kiro")
+	kiro.Post("", kiroH.KiroProxy)                                    // Generic proxy endpoint
 	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
 	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
 
