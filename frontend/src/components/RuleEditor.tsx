@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import api, { Rule, EmailContext, RuleResult } from '@/lib/api';
-import { naturalLanguageToLua, luaToNaturalLanguage } from '@/lib/kiro';
+import { naturalLanguageToLua, luaToNaturalLanguage, KiroTranslationError } from '@/lib/kiro';
 import ReferencePanel from '@/components/ReferencePanel';
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
@@ -69,6 +69,9 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const luaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastEditSource, setLastEditSource] = useState<'nl' | 'lua' | null>(null);
 
+  // Error banner state for non-Lua AI responses
+  const [errorBanner, setErrorBanner] = useState<{ error: string; message: string } | null>(null);
+
   // Translate natural language → Lua (debounced)
   const translateNlToLua = useCallback((text: string) => {
     if (nlDebounceRef.current) clearTimeout(nlDebounceRef.current);
@@ -78,10 +81,16 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
       try {
         setTranslating('nl2lua');
         setTranslationError('');
+        setErrorBanner(null);
         const code = await naturalLanguageToLua(text);
         setLuaCode(code);
       } catch (err) {
-        setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+        if (err instanceof KiroTranslationError) {
+          // Show error banner, don't update the Lua code
+          setErrorBanner({ error: err.message, message: err.aiMessage });
+        } else {
+          setTranslationError(err instanceof Error ? err.message : 'Translation failed');
+        }
       } finally {
         setTranslating(null);
       }
@@ -312,6 +321,31 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
           {translationError && (
             <div className="mb-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-700 dark:text-amber-400 text-sm" role="alert">
               ⚠️ Translation: {translationError}
+            </div>
+          )}
+
+          {/* Error banner for non-Lua AI responses */}
+          {errorBanner && (
+            <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg" role="alert">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-sm font-medium text-red-700 dark:text-red-400">
+                    ⚠️ {errorBanner.error}
+                  </div>
+                  {errorBanner.message && (
+                    <div className="mt-2 text-sm text-red-600 dark:text-red-300 whitespace-pre-wrap">
+                      {errorBanner.message}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => setErrorBanner(null)}
+                  className="ml-3 text-red-400 hover:text-red-600 dark:hover:text-red-300"
+                  aria-label="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           )}
 

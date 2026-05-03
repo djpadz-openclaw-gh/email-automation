@@ -56,53 +56,109 @@ The Lua rules have access to these globals and helpers:
 - email.sender_address (string) — the sender's email address
 - email.sender_name (string) — the sender's display name
 - email.subject (string) — the email subject line
-- email.date (table) — the email date
+- email.body_preview (string) — first ~200 chars of the email body
+- email.date (string) — the email date in RFC3339 format
+- email.age_seconds (number) — how old the email is in seconds
 - email.has_attachments (boolean) — whether the email has attachments
-- email.flags (table) — IMAP flags on the message
+- email.attachment_names (table) — list of attachment filenames
+- email.attachment_types (table) — list of attachment MIME types
+- email.recipients (table) — list of recipient addresses
+- email.headers (table) — email headers as key-value pairs
+- email.folder (string) — current IMAP folder
+
+Action functions (call one to set result):
+- skip() — rule doesn't apply
+- keep(reason) — keep in inbox, stop rule chain
+- move(folder, reason) — move to a folder
+- archive(reason) — archive the email
+- delete(reason) — delete the email
+- notify(message, reason) — send a notification
+- move_after(folder, delay_secs, reason) — move after a delay
+- delete_after(delay_secs, reason) — delete after a delay
 
 Helper functions:
-- skip() — return this to skip the email (rule doesn't apply)
-- keep(reason) — return this to keep the email in the inbox
-- move(folder, reason) — return this to move the email to a folder
-- archive(reason) — return this to archive the email
-- delete_msg(reason) — return this to delete the email
-- flag(name, reason) — return this to flag the email
-- older_than_hours(n) — returns true if the email is older than n hours
-- contains_any(str, patterns) — returns true if str contains any of the patterns
-- has_ics() — returns true if the email has a .ics calendar attachment
+- contains(haystack, needle) — case-insensitive substring match
+- contains_any(haystack, {needles}) — case-insensitive, matches any
+- starts_with(text, prefix) — case-insensitive prefix match
+- ends_with(text, suffix) — case-insensitive suffix match
+- domain_of(email_addr) — extract domain from email address
+- older_than(secs), older_than_hours(h), older_than_days(d) — age checks
+- has_ics() — has calendar attachment
+- has_attachment_type(mime) — has attachment of given MIME type
+- is_reply() — subject starts with Re:/Fwd:/etc.
+- now_hour() — current hour in UTC
+
+Kiro AI functions (for SEMANTIC evaluation only):
+- kiro.classify(email, question) — ask AI a yes/no question about the email
+- kiro.is_actionable(email) — ask AI if the email requires action
+
+IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
+
+1. PREFER simple string matching for concrete, deterministic criteria:
+   - Matching specific senders, domains, subjects → use contains(), domain_of(), etc.
+   - "emails from John" → sender_address or sender_name matching
+   - "emails about shipping" → contains(subject, "shipping")
+   - "newsletters" → contains(sender, "newsletter") or domain matching
+
+2. Use kiro.classify() ONLY when the request is inherently semantic/subjective:
+   - "important emails" → kiro.classify(email, "Is this email important or urgent?")
+   - "invoices from vendors" → kiro.classify(email, "Is this an invoice from a vendor?")
+   - "spam that got through" → kiro.classify(email, "Does this look like spam?")
+   - "emails that need a reply" → kiro.is_actionable(email)
+
+3. Use kiro.is_actionable() for action/triage questions:
+   - "actionable emails" → kiro.is_actionable(email)
+   - "emails I need to respond to" → kiro.is_actionable(email)
 
 Rules should:
 1. Start with a comment block describing the rule
-2. Extract relevant email fields into local variables
-3. Check conditions and return skip() if the rule doesn't apply
-4. Return an action (move, archive, delete_msg, keep, flag) with a reason string
+2. Use simple pattern matching first (fast, no API calls)
+3. Only fall back to kiro.classify() when the criteria cannot be expressed as string matching
+4. Return skip() if the rule doesn't apply
+5. Return an action with a reason string
 
-Example rule:
+Example 1 - Simple pattern (NO kiro needed):
 ` + "```lua" + `
--- Rule: Amazon
+-- Rule: Amazon Orders
 -- Move Amazon order/shipping emails older than 24 hours to @Amazon.
 
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-local domains = { "amazon.com", "marketplace.amazon.com" }
-local keywords = { "your order", "has shipped", "delivered" }
-
-local sender_match = false
-for _, domain in ipairs(domains) do
-    if sender:find(domain, 1, true) then
-        sender_match = true
-        break
-    end
-end
-
-if not sender_match then return skip() end
-if not contains_any(subject, keywords) then return skip() end
+if not ends_with(sender, "amazon.com") then return skip() end
+if not contains_any(subject, {"your order", "has shipped", "delivered"}) then return skip() end
 if not older_than_hours(24) then
     return keep("Amazon order email, keeping until 24h old")
 end
 
 return move("@Amazon", "Amazon order/shipping email filed")
+` + "```" + `
+
+Example 2 - Semantic evaluation (kiro needed):
+` + "```lua" + `
+-- Rule: Vendor Invoices
+-- Detect invoices from vendors and move to @Invoices.
+
+if not kiro.classify(email, "Is this an invoice or payment request from a vendor or supplier?") then
+    return skip()
+end
+
+return move("@Invoices", "Vendor invoice detected by AI")
+` + "```" + `
+
+Example 3 - Combined approach:
+` + "```lua" + `
+-- Rule: Actionable emails from team
+-- Keep actionable emails from the team, archive the rest.
+
+local sender = email.sender_address:lower()
+if not ends_with(sender, "@mycompany.com") then return skip() end
+
+if kiro.is_actionable(email) then
+    return keep("Actionable email from team member")
+end
+
+return archive("Non-actionable team email")
 ` + "```" + `
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
@@ -111,8 +167,13 @@ const luaToEnglishSystemPrompt = `You are an expert at reading Lua email filteri
 
 Given a Lua email rule, describe what it does in clear, concise English. Focus on:
 1. What emails the rule matches (sender, subject, conditions)
-2. What action it takes (move, archive, delete, keep, flag)
+2. What action it takes (move, archive, delete, keep, flag, notify)
 3. Any timing conditions (e.g., "older than 24 hours")
+4. Any AI/semantic evaluation (kiro.classify or kiro.is_actionable calls)
+
+Note: Rules may use kiro.classify(email, question) for AI-based semantic classification
+or kiro.is_actionable(email) to determine if an email requires action. When describing
+these, explain what semantic criteria the rule is checking.
 
 Be concise but complete. Write a single paragraph or a few short sentences. Do not include any code in your response.`
 
@@ -170,28 +231,6 @@ func looksLikeLua(text string) bool {
 		}
 	}
 	return false
-}
-
-// wrapInLuaComments wraps arbitrary text in Lua comments so the result is
-// syntactically valid Lua. Each line of the original text is prefixed with "-- ".
-func wrapInLuaComments(text string) string {
-	var b strings.Builder
-	b.WriteString("-- Error or incomplete rule:\n")
-	for _, line := range strings.Split(text, "\n") {
-		b.WriteString("-- ")
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// ensureLua returns text as-is if it looks like Lua code, otherwise wraps it
-// in Lua comments so the consumer always receives syntactically valid Lua.
-func ensureLua(text string) string {
-	if looksLikeLua(text) {
-		return text
-	}
-	return wrapInLuaComments(text)
 }
 
 // callKiroAPI sends a prompt to the Kiro/Anthropic API and returns the response text.
@@ -285,7 +324,17 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
 	}
 
-	return c.JSON(englishToLuaResponse{LuaCode: ensureLua(luaCode)})
+	// If the response doesn't look like Lua code, return it as an error
+	// so the frontend can show a banner instead of replacing the editor content.
+	if !looksLikeLua(luaCode) {
+		return c.JSON(fiber.Map{
+			"error":    "The AI response was not valid Lua code",
+			"message":  luaCode,
+			"lua_code": "",
+		})
+	}
+
+	return c.JSON(englishToLuaResponse{LuaCode: luaCode})
 }
 
 // TranslateLuaToEnglish handles POST /api/kiro/translate/lua-to-english
@@ -379,9 +428,15 @@ func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 	// Find the text block, skipping thinking blocks
 	for _, block := range apiResp.Content {
 		if block.Type == "text" {
-			// Wrap non-Lua responses in Lua comments so the frontend
-			// always receives syntactically valid Lua.
-			text := ensureLua(block.Text)
+			text := block.Text
+			// If the response doesn't look like Lua, return an error field
+			// so the frontend can show a banner instead of updating the editor.
+			if !looksLikeLua(text) {
+				return c.JSON(fiber.Map{
+					"error":   "The AI response was not valid Lua code",
+					"message": text,
+				})
+			}
 			return c.JSON(fiber.Map{
 				"content": []fiber.Map{
 					{

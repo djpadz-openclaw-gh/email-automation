@@ -8,7 +8,19 @@ interface KiroMessage {
 }
 
 interface KiroResponse {
-  content: Array<{ type: string; text: string }>;
+  content?: Array<{ type: string; text: string }>;
+  error?: string;
+  message?: string;
+}
+
+// Custom error class for non-Lua AI responses
+export class KiroTranslationError extends Error {
+  public aiMessage: string;
+  constructor(error: string, aiMessage: string) {
+    super(error);
+    this.name = 'KiroTranslationError';
+    this.aiMessage = aiMessage;
+  }
 }
 
 // Translation cache to minimize API calls
@@ -56,6 +68,12 @@ async function callKiro(messages: KiroMessage[]): Promise<string> {
   }
 
   const data: KiroResponse = await res.json();
+
+  // Check if the response contains an error field (non-Lua response)
+  if (data.error) {
+    throw new KiroTranslationError(data.error, data.message || '');
+  }
+
   if (data.content && data.content.length > 0) {
     return data.content[0].text;
   }
@@ -87,6 +105,15 @@ Helper functions:
 - starts_with(text, prefix), ends_with(text, suffix)
 - domain_of(email_addr), older_than(secs), older_than_hours(h), older_than_days(d)
 - has_ics(), has_attachment_type(mime), is_reply(), now_hour()
+
+Kiro AI functions (for SEMANTIC evaluation only):
+- kiro.classify(email, question) - ask AI a yes/no question about the email
+- kiro.is_actionable(email) - ask AI if the email requires action from the recipient
+
+Guidelines:
+- PREFER simple string matching (contains, domain_of, etc.) for concrete criteria
+- Use kiro.classify() ONLY for inherently semantic/subjective questions
+- Use kiro.is_actionable() for action/triage questions
 
 Lua standard library: string, table, math (safe subset only).`;
 
