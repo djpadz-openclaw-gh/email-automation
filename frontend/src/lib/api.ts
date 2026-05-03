@@ -142,13 +142,22 @@ class ApiClient {
       headers,
     });
 
-    if (res.status === 401 && this.onUnauthorized) {
-      this.onUnauthorized();
-      throw new Error('Session expired');
-    }
-
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
+      
+      // For 401, check if it's TOTP required before treating as session expired
+      if (res.status === 401) {
+        const errorMsg = body.error || res.statusText;
+        // If it's TOTP required, throw that error so LoginForm can handle it
+        if (errorMsg.includes('TOTP token required') || body.totp_required) {
+          throw new Error(errorMsg);
+        }
+        // Otherwise it's a real session expiration
+        if (this.onUnauthorized) {
+          this.onUnauthorized();
+        }
+      }
+      
       throw new Error(body.error || `API error: ${res.status}`);
     }
 
@@ -173,13 +182,22 @@ class ApiClient {
       body,
     });
 
-    if (res.status === 401 && this.onUnauthorized) {
-      this.onUnauthorized();
-      throw new Error('Session expired');
-    }
-
     if (!res.ok) {
       const respBody = await res.json().catch(() => ({ error: res.statusText }));
+      
+      // For 401, check if it's TOTP required before treating as session expired
+      if (res.status === 401) {
+        const errorMsg = respBody.error || res.statusText;
+        // If it's TOTP required, throw that error so LoginForm can handle it
+        if (errorMsg.includes('TOTP token required') || respBody.totp_required) {
+          throw new Error(errorMsg);
+        }
+        // Otherwise it's a real session expiration
+        if (this.onUnauthorized) {
+          this.onUnauthorized();
+        }
+      }
+      
       throw new Error(respBody.error || `API error: ${res.status}`);
     }
 
