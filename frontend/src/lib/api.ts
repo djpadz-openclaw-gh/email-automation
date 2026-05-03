@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || 'http://localhost:8080';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || '';
 
 export interface Rule {
   id: number;
@@ -135,7 +135,8 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    const res = await fetch(`${API_URL}${path}`, {
+    const url = API_URL ? `${API_URL}${path}` : path;
+    const res = await fetch(url, {
       ...options,
       headers,
     });
@@ -164,7 +165,8 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    const res = await fetch(`${API_URL}${path}`, {
+    const url = API_URL ? `${API_URL}${path}` : path;
+    const res = await fetch(url, {
       method,
       headers,
       body,

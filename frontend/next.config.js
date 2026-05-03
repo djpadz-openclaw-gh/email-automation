@@ -3,10 +3,10 @@ const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
   env: {
-    API_URL: process.env.API_URL || 'http://localhost:8080',
+    API_URL: process.env.API_URL || 'http://api.email-automation.svc.cluster.local:8080',
   },
   async rewrites() {
-    const apiUrl = process.env.API_URL || 'http://localhost:8080';
+    const apiUrl = process.env.API_URL || 'http://api.email-automation.svc.cluster.local:8080';
     return [
       {
         source: '/auth/:path*',
@@ -15,6 +15,10 @@ const nextConfig = {
       {
         source: '/api/:path*',
         destination: `${apiUrl}/api/:path*`,
+      },
+      {
+        source: '/config',
+        destination: `${apiUrl}/config`,
       },
       {
         source: '/health',
