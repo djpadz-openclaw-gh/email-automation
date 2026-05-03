@@ -302,16 +302,17 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 	sessionKey := fmt.Sprintf("auth_%d", user.ID)
 	session, ok := h.getSession(sessionKey)
 	if !ok {
-		session, ok = h.getSession("auth_discoverable")
+		discoverableSession, ok := h.getSession("auth_discoverable")
 		if !ok {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no authentication in progress"})
 		}
-		sessionKey = "auth_discoverable"
+		session = discoverableSession
 		log.Info().Msg("using discoverable login session")
+		defer h.deleteSession("auth_discoverable")
 	} else {
 		log.Info().Str("session_key", sessionKey).Msg("using user-specific login session")
+		defer h.deleteSession(sessionKey)
 	}
-	defer h.deleteSession(sessionKey)
 
 	credential, err := h.WebAuthn.ValidateLogin(wanUser, *session, parsedResponse)
 	if err != nil {
