@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -141,6 +142,58 @@ type anthropicResponse struct {
 	} `json:"error"`
 }
 
+// looksLikeLua checks whether text appears to be valid Lua code by inspecting
+// the first non-empty line for common Lua tokens.
+func looksLikeLua(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+
+	// Lua code typically starts with one of these tokens.
+	prefixes := []string{
+		"--",       // comment
+		"local ",   // local declaration
+		"if ",      // conditional
+		"function ", // function definition
+		"for ",     // for loop
+		"while ",   // while loop
+		"repeat",   // repeat-until
+		"return ",  // return statement
+		"do",       // do block
+	}
+
+	lower := strings.ToLower(trimmed)
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapInLuaComments wraps arbitrary text in Lua comments so the result is
+// syntactically valid Lua. Each line of the original text is prefixed with "-- ".
+func wrapInLuaComments(text string) string {
+	var b strings.Builder
+	b.WriteString("-- Error or incomplete rule:\n")
+	for _, line := range strings.Split(text, "\n") {
+		b.WriteString("-- ")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// ensureLua returns text as-is if it looks like Lua code, otherwise wraps it
+// in Lua comments so the consumer always receives syntactically valid Lua.
+func ensureLua(text string) string {
+	if looksLikeLua(text) {
+		return text
+	}
+	return wrapInLuaComments(text)
+}
+
 // callKiroAPI sends a prompt to the Kiro/Anthropic API and returns the response text.
 func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, error) {
 	if h.Config.KiroAPIKey == "" {
@@ -232,7 +285,7 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
 	}
 
-	return c.JSON(englishToLuaResponse{LuaCode: luaCode})
+	return c.JSON(englishToLuaResponse{LuaCode: ensureLua(luaCode)})
 }
 
 // TranslateLuaToEnglish handles POST /api/kiro/translate/lua-to-english
@@ -326,12 +379,14 @@ func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 	// Find the text block, skipping thinking blocks
 	for _, block := range apiResp.Content {
 		if block.Type == "text" {
-			// Return a clean response with only the text content block
+			// Wrap non-Lua responses in Lua comments so the frontend
+			// always receives syntactically valid Lua.
+			text := ensureLua(block.Text)
 			return c.JSON(fiber.Map{
 				"content": []fiber.Map{
 					{
 						"type": "text",
-						"text": block.Text,
+						"text": text,
 					},
 				},
 			})
