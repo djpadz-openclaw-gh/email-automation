@@ -1,4 +1,5 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || process.env.API_URL || '';
+// Use relative paths - Next.js rewrites will proxy to backend
+const API_URL = '';
 
 export interface Rule {
   id: number;
