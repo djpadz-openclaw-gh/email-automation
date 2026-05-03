@@ -258,6 +258,7 @@ func (h *KiroHandlers) TranslateLuaToEnglish(c *fiber.Ctx) error {
 }
 
 // Proxy accepts an Anthropic-compatible request and proxies it to the configured Kiro API endpoint.
+// It parses the upstream response and returns only the text content block, filtering out thinking blocks.
 func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 	if h.Config.KiroAPIKey == "" {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
@@ -301,6 +302,44 @@ func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 		})
 	}
 
-	c.Set("Content-Type", resp.Header.Get("Content-Type"))
-	return c.Status(resp.StatusCode).Send(respBody)
+	// For non-200 responses, pass through as-is
+	if resp.StatusCode != http.StatusOK {
+		c.Set("Content-Type", resp.Header.Get("Content-Type"))
+		return c.Status(resp.StatusCode).Send(respBody)
+	}
+
+	// Parse the Anthropic response and extract only the text content block
+	var apiResp anthropicResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		log.Error().Err(err).Str("body", string(respBody)).Msg("failed to parse upstream response")
+		// Fall back to raw response if parsing fails
+		c.Set("Content-Type", resp.Header.Get("Content-Type"))
+		return c.Status(resp.StatusCode).Send(respBody)
+	}
+
+	if apiResp.Error != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error": apiResp.Error.Message,
+		})
+	}
+
+	// Find the text block, skipping thinking blocks
+	for _, block := range apiResp.Content {
+		if block.Type == "text" {
+			// Return a clean response with only the text content block
+			return c.JSON(fiber.Map{
+				"content": []fiber.Map{
+					{
+						"type": "text",
+						"text": block.Text,
+					},
+				},
+			})
+		}
+	}
+
+	log.Error().Str("body", string(respBody)).Msg("no text content block in upstream response")
+	return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		"error": "no text content in API response",
+	})
 }
