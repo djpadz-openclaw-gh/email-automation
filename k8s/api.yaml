@@ -90,6 +90,10 @@ metadata:
     app.kubernetes.io/name: email-automation
     app.kubernetes.io/component: api
 spec:
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
   selector:
     app.kubernetes.io/name: email-automation
     app.kubernetes.io/component: api
