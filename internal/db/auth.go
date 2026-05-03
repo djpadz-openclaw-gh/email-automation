@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/djpadz/email-automation/internal/models"
@@ -241,4 +242,20 @@ func (db *DB) AssignTenantToUser(ctx context.Context, tenantID, userID int64) er
 	_, err := db.Pool.Exec(ctx,
 		`UPDATE tenants SET user_id = $1 WHERE id = $2`, userID, tenantID)
 	return err
+}
+
+// CreateTenantForUser creates a default tenant for a user who doesn't have one.
+func (db *DB) CreateTenantForUser(ctx context.Context, userID int64, username string) (*models.Tenant, error) {
+	t := &models.Tenant{}
+	slug := fmt.Sprintf("user-%d", userID)
+	apiKey := fmt.Sprintf("auto_%d_%d", userID, time.Now().UnixNano())
+	err := db.Pool.QueryRow(ctx,
+		`INSERT INTO tenants (name, slug, api_key, user_id) VALUES ($1, $2, $3, $4)
+		 RETURNING id, name, slug, api_key, created_at, updated_at`,
+		username+"'s workspace", slug, apiKey, userID,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
 }

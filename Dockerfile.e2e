@@ -1,14 +1,7 @@
 FROM mcr.microsoft.com/playwright:v1.59.1-noble
-
 WORKDIR /work
-
-# Install playwright test
 RUN npm init -y && npm install --ignore-scripts @playwright/test
-
-# Copy config and tests
 COPY playwright.config.ts .
 COPY tests/e2e/ tests/e2e/
-
 RUN mkdir -p tests/e2e/screenshots tests/e2e/results
-
 CMD ["npx", "playwright", "test", "--reporter=list"]

@@ -43,11 +43,18 @@ func JWTAuthMiddleware(database *db.DB, jwtMgr *auth.JWTManager) fiber.Handler {
 				c.Locals("user_id", claims.UserID)
 				c.Locals("username", claims.Username)
 
-				// Find tenant for this user
+				// Find tenant for this user, auto-create if none exists
 				tenants, err := database.GetTenantsByUserID(c.Context(), claims.UserID)
 				if err == nil && len(tenants) > 0 {
 					c.Locals("tenant_id", tenants[0].ID)
 					c.Locals("tenant", &tenants[0])
+				} else if err == nil && len(tenants) == 0 {
+					// Auto-create a default tenant for this user
+					newTenant, createErr := database.CreateTenantForUser(c.Context(), claims.UserID, claims.Username)
+					if createErr == nil {
+						c.Locals("tenant_id", newTenant.ID)
+						c.Locals("tenant", newTenant)
+					}
 				}
 
 				return c.Next()
@@ -101,11 +108,18 @@ func tryUserAPIKeyAuth(c *fiber.Ctx, database *db.DB, apiKey string) error {
 	c.Locals("user_id", user.ID)
 	c.Locals("username", user.Username)
 
-	// Find tenant for this user
+	// Find tenant for this user, auto-create if none exists
 	tenants, err := database.GetTenantsByUserID(c.Context(), user.ID)
 	if err == nil && len(tenants) > 0 {
 		c.Locals("tenant_id", tenants[0].ID)
 		c.Locals("tenant", &tenants[0])
+	} else if err == nil && len(tenants) == 0 {
+		// Auto-create a default tenant for this user
+		newTenant, createErr := database.CreateTenantForUser(c.Context(), user.ID, user.Username)
+		if createErr == nil {
+			c.Locals("tenant_id", newTenant.ID)
+			c.Locals("tenant", newTenant)
+		}
 	}
 
 	return c.Next()

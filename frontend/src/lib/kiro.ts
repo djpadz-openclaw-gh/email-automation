@@ -1,6 +1,6 @@
+// Use the Next.js API route proxy to avoid exposing the Kiro API key client-side
 const KIRO_API_URL =
-  process.env.NEXT_PUBLIC_KIRO_API_URL ||
-  'http://kiro-gateway.kiro-gateway.svc.cluster.local:9000/v1/messages';
+  process.env.NEXT_PUBLIC_KIRO_API_URL || '/api/kiro';
 
 interface KiroMessage {
   role: 'user' | 'assistant';

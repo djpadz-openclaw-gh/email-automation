@@ -15,7 +15,10 @@ type AccountHandlers struct {
 }
 
 func (h *AccountHandlers) tenantID(c *fiber.Ctx) int64 {
-	return c.Locals("tenant_id").(int64)
+	if tid, ok := c.Locals("tenant_id").(int64); ok {
+		return tid
+	}
+	return 0
 }
 
 // ListAccounts returns all accounts for the tenant.

@@ -17,7 +17,10 @@ type RuleHandlers struct {
 }
 
 func (h *RuleHandlers) tenantID(c *fiber.Ctx) int64 {
-	return c.Locals("tenant_id").(int64)
+	if tid, ok := c.Locals("tenant_id").(int64); ok {
+		return tid
+	}
+	return 0
 }
 
 // ListRules returns all rules for the tenant.
