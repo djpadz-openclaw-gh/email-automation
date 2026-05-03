@@ -98,6 +98,11 @@ func (s *Server) setupRoutes() {
 	authGroup.Post("/passkey/authenticate/begin", authH.PasskeyAuthenticateBegin)
 	authGroup.Post("/passkey/authenticate/complete", authH.PasskeyAuthenticateComplete)
 
+	// Passkey registration for new users (no auth required)
+	authGroup.Post("/register/passkey", authH.RegisterUserWithPasskey)
+	authGroup.Post("/passkey/enroll/begin", authH.PasskeyEnrollBegin)
+	authGroup.Post("/passkey/enroll/finish", authH.PasskeyEnrollFinish)
+
 	// Auth-required endpoints
 	authProtected := authGroup.Group("", middleware.JWTAuthMiddleware(s.db, s.jwt), middleware.RequireAuth())
 	authProtected.Get("/profile", authH.GetProfile)

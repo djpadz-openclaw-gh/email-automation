@@ -424,3 +424,213 @@ func (h *AuthHandlers) PasskeyDelete(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"message": "passkey deleted"})
 }
+
+// RegisterUserWithPasskey handles POST /auth/register/passkey (PUBLIC - no auth required)
+func (h *AuthHandlers) RegisterUserWithPasskey(c *fiber.Ctx) error {
+	var req struct {
+		Username string `json:"username"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	if req.Username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "username is required"})
+	}
+
+	// Check if user already exists
+	_, err := h.DB.GetUserByUsername(c.Context(), req.Username)
+	if err == nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "username already exists"})
+	}
+
+	// Create new user
+	user := &models.User{
+		Username: req.Username,
+	}
+
+	if err := h.DB.CreateUser(c.Context(), user); err != nil {
+		log.Error().Err(err).Msg("failed to create user")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create user"})
+	}
+
+	return c.JSON(fiber.Map{
+		"user_id":  user.ID,
+		"username": user.Username,
+	})
+}
+
+// PasskeyEnrollBegin handles POST /auth/passkey/enroll/begin (PUBLIC - no auth required)
+func (h *AuthHandlers) PasskeyEnrollBegin(c *fiber.Ctx) error {
+	var req struct {
+		Username string `json:"username"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	if req.Username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "username is required"})
+	}
+
+	// Look up user
+	user, err := h.DB.GetUserByUsername(c.Context(), req.Username)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
+	}
+
+	// Get existing passkeys to exclude
+	existingPasskeys, err := h.DB.GetPasskeysByUserID(c.Context(), user.ID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get passkeys")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+
+	var credentials []webauthn.Credential
+	for _, p := range existingPasskeys {
+		record := &internalAuth.PasskeyRecord{
+			CredentialID: p.CredentialID,
+			PublicKey:    p.PublicKey,
+			SignCount:    p.SignCount,
+			Transports:   p.Transports,
+		}
+		cred, err := record.ToWebAuthnCredential()
+		if err != nil {
+			continue
+		}
+		credentials = append(credentials, cred)
+	}
+
+	wanUser := &internalAuth.WebAuthnUser{
+		ID:          user.ID,
+		Username:    user.Username,
+		Credentials: credentials,
+	}
+
+	options, session, err := h.WebAuthn.BeginRegistration(wanUser)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to begin passkey registration")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to begin enrollment"})
+	}
+
+	// Store session keyed by username for public enrollment
+	sessionKey := fmt.Sprintf("enroll_%s", req.Username)
+	h.storeSession(sessionKey, session)
+
+	return c.JSON(options)
+}
+
+// PasskeyEnrollFinish handles POST /auth/passkey/enroll/finish (PUBLIC - no auth required)
+func (h *AuthHandlers) PasskeyEnrollFinish(c *fiber.Ctx) error {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("panic in PasskeyEnrollFinish")
+		}
+	}()
+
+	// Get username from query param or body
+	username := c.Query("username")
+	if username == "" {
+		var req struct {
+			Username string `json:"username"`
+		}
+		if err := c.BodyParser(&req); err == nil && req.Username != "" {
+			username = req.Username
+		}
+	}
+
+	if username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "username is required"})
+	}
+
+	// Look up user
+	user, err := h.DB.GetUserByUsername(c.Context(), username)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
+	}
+
+	// Retrieve session from enrollment begin
+	sessionKey := fmt.Sprintf("enroll_%s", username)
+	session, ok := h.getSession(sessionKey)
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no enrollment in progress"})
+	}
+	defer h.deleteSession(sessionKey)
+
+	// Get existing passkeys
+	existingPasskeys, err := h.DB.GetPasskeysByUserID(c.Context(), user.ID)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get passkeys")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+
+	var credentials []webauthn.Credential
+	for _, p := range existingPasskeys {
+		record := &internalAuth.PasskeyRecord{
+			CredentialID: p.CredentialID,
+			PublicKey:    p.PublicKey,
+			SignCount:    p.SignCount,
+			Transports:   p.Transports,
+		}
+		cred, err := record.ToWebAuthnCredential()
+		if err != nil {
+			continue
+		}
+		credentials = append(credentials, cred)
+	}
+
+	wanUser := &internalAuth.WebAuthnUser{
+		ID:          user.ID,
+		Username:    user.Username,
+		Credentials: credentials,
+	}
+
+	// Parse the attestation response
+	parsedResponse, err := protocol.ParseCredentialCreationResponseBody(bytes.NewReader(c.Body()))
+	if err != nil {
+		log.Error().Err(err).Msg("failed to parse credential creation response")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid attestation response"})
+	}
+
+	if h.WebAuthn == nil {
+		log.Error().Msg("WebAuthn is nil - initialization failed")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "passkey enrollment not available"})
+	}
+
+	credential, err := h.WebAuthn.CreateCredential(wanUser, *session, parsedResponse)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create credential")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to verify attestation"})
+	}
+
+	// Store the credential
+	var transports []string
+	for _, t := range credential.Transport {
+		transports = append(transports, string(t))
+	}
+
+	passkey := &models.Passkey{
+		UserID:       user.ID,
+		CredentialID: base64.RawURLEncoding.EncodeToString(credential.ID),
+		PublicKey:    base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+		SignCount:    credential.Authenticator.SignCount,
+		Transports:   transports,
+		Name:         fmt.Sprintf("Passkey %d", len(existingPasskeys)+1),
+	}
+
+	if err := h.DB.CreatePasskey(c.Context(), passkey); err != nil {
+		log.Error().Err(err).Msg("failed to store passkey")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to store passkey"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "passkey enrolled successfully",
+		"passkey": fiber.Map{
+			"id":   passkey.ID,
+			"name": passkey.Name,
+		},
+	})
+}
