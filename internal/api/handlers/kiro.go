@@ -268,7 +268,7 @@ func (h *KiroHandlers) KiroProxy(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to marshal request"})
 	}
 
-	req2, err := http.NewRequest("POST", h.Config.KiroAPIURL+"/v1/messages", bytes.NewReader(jsonBody))
+	req2, err := http.NewRequest("POST", h.Config.KiroAPIURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create request"})
 	}
