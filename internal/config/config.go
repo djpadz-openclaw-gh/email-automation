@@ -49,7 +49,7 @@ type Config struct {
 	WebAuthnRPDisplayName string
 	WebAuthnRPOrigins     []string
 
-	// Kiro API (AI translation)
+	// Kiro API
 	KiroAPIKey string
 	KiroAPIURL string
 

@@ -24,7 +24,7 @@ type KiroHandlers struct {
 func NewKiroHandlers(cfg *config.Config) *KiroHandlers {
 	return &KiroHandlers{
 		Config: cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -161,7 +161,7 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", h.Config.KiroAPIURL+"/v1/messages", bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", h.Config.KiroAPIURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -255,4 +255,52 @@ func (h *KiroHandlers) TranslateLuaToEnglish(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(luaToEnglishResponse{Description: description})
+}
+
+// Proxy accepts an Anthropic-compatible request and proxies it to the configured Kiro API endpoint.
+func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
+	if h.Config.KiroAPIKey == "" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "Kiro API key not configured",
+		})
+	}
+
+	body := c.Body()
+	if len(body) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "request body is required",
+		})
+	}
+
+	req, err := http.NewRequestWithContext(c.Context(), http.MethodPost, h.Config.KiroAPIURL, bytes.NewReader(body))
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create upstream request")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to create upstream request",
+		})
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", h.Config.KiroAPIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to proxy request to Kiro API")
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error": "failed to reach upstream API",
+		})
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to read upstream response")
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error": "failed to read upstream response",
+		})
+	}
+
+	c.Set("Content-Type", resp.Header.Get("Content-Type"))
+	return c.Status(resp.StatusCode).Send(respBody)
 }

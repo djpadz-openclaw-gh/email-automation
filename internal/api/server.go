@@ -74,10 +74,6 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// Kiro API proxy (no auth)
-	kiroH := handlers.NewKiroHandler(s.config)
-	s.app.Post("/api/kiro", kiroH.Proxy)
-
 	// --- Auth endpoints (no auth required for login/register) ---
 	var wan *webauthn.WebAuthn
 	var err error
@@ -122,8 +118,9 @@ func (s *Server) setupRoutes() {
 	authProtected.Get("/apikeys", authH.APIKeyList)
 	authProtected.Delete("/apikeys/:id", authH.APIKeyDelete)
 
-	// Kiro AI translation endpoints (no auth required)
+	// Kiro AI endpoints (no auth required)
 	kiroH := handlers.NewKiroHandlers(s.config)
+	s.app.Post("/api/kiro", kiroH.Proxy)
 	kiro := s.app.Group("/api/kiro")
 	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
 	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
