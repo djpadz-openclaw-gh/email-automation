@@ -57,6 +57,8 @@ The Lua rules have access to these globals and helpers:
 - email.subject (string) — the email subject line
 - email.date (table) — the email date
 - email.has_attachments (boolean) — whether the email has attachments
+- email.has_images (boolean) — whether the email has image attachments
+- email.ocr_text (string) — extracted text from image attachments via OCR
 - email.flags (table) — IMAP flags on the message
 
 Helper functions:
@@ -69,6 +71,15 @@ Helper functions:
 - older_than_hours(n) — returns true if the email is older than n hours
 - contains_any(str, patterns) — returns true if str contains any of the patterns
 - has_ics() — returns true if the email has a .ics calendar attachment
+
+Semantic analysis functions (for complex/subjective criteria):
+- kiro.classify(email, question) — Ask AI to classify the email based on a semantic question. Returns true/false. Use this for:
+  * Image content analysis (e.g., "Does this image contain McAfee or Geek Squad text?")
+  * Subjective criteria (e.g., "Is this email actionable?")
+  * Fraud detection (e.g., "Does this look like a phishing email?")
+  * Complex patterns that can't be matched with simple string matching
+- kiro.is_actionable(email) — Returns true if the email requires action
+- kiro.is_fake_invoice(email) — Returns true if the email appears to be a fake invoice (uses OCR text)
 
 Rules should:
 1. Start with a comment block describing the rule
@@ -103,6 +114,8 @@ end
 
 return move("@Amazon", "Amazon order/shipping email filed")
 ` + "```" + `
+
+IMPORTANT: For image-based rules (when user mentions "picture of", "image contains", "looks like", etc.), use kiro.classify(email, "question") to analyze image content via OCR. Example: "If email has image of McAfee invoice" → if kiro.classify(email, "Does this image contain McAfee text?") then move("Junk") end
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
 
