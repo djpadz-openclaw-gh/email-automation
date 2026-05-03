@@ -17,11 +17,17 @@ type WebAuthnUser struct {
 
 // WebAuthnUserID returns the user's ID as bytes.
 func (u *WebAuthnUser) WebAuthnID() []byte {
-	// Use a stable byte representation of the user ID
+	// Use big-endian encoding for user ID (standard for WebAuthn)
+	// This ensures consistent encoding across registration and authentication
 	buf := make([]byte, 8)
-	for i := 0; i < 8; i++ {
-		buf[i] = byte(u.ID >> (i * 8))
-	}
+	buf[0] = byte(u.ID >> 56)
+	buf[1] = byte(u.ID >> 48)
+	buf[2] = byte(u.ID >> 40)
+	buf[3] = byte(u.ID >> 32)
+	buf[4] = byte(u.ID >> 24)
+	buf[5] = byte(u.ID >> 16)
+	buf[6] = byte(u.ID >> 8)
+	buf[7] = byte(u.ID)
 	return buf
 }
 
