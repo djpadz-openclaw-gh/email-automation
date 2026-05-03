@@ -74,6 +74,10 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// Kiro API proxy (no auth)
+	kiroH := handlers.NewKiroHandler(s.config)
+	s.app.Post("/api/kiro", kiroH.Proxy)
+
 	// --- Auth endpoints (no auth required for login/register) ---
 	var wan *webauthn.WebAuthn
 	var err error
