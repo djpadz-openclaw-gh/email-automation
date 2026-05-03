@@ -167,7 +167,7 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", h.Config.KiroAPIKey)
+	req.Header.Set("Authorization", "Bearer "+h.Config.KiroAPIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := h.client.Do(req)
