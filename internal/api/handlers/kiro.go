@@ -115,7 +115,23 @@ end
 return move("@Amazon", "Amazon order/shipping email filed")
 ` + "```" + `
 
-IMPORTANT: For image-based rules (when user mentions "picture of", "image contains", "looks like", etc.), use kiro.classify(email, "question") to analyze image content via OCR. Example: "If email has image of McAfee invoice" → if kiro.classify(email, "Does this image contain McAfee text?") then move("Junk") end
+IMPORTANT: For image-based rules (when user mentions "picture of", "image contains", "looks like", etc.), use kiro.classify(email, "question") to analyze image content via OCR.
+
+Example for image-based rule:
+` + "```lua" + `
+-- Rule: McAfee/Geek Squad Scam Detection
+-- Move emails with images containing McAfee or Geek Squad text to Junk
+
+if not email.has_images then return skip() end
+
+if kiro.classify(email, "Does this image contain McAfee or Geek Squad text?") then
+    return move("Junk", "Image contains McAfee or Geek Squad scam")
+end
+
+return skip()
+` + "```" + `
+
+Key pattern: Check for images first (early return if none), then call kiro.classify(), then explicit return skip() at end.
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
 
