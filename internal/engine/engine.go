@@ -12,11 +12,23 @@ import (
 )
 
 // Engine evaluates Lua rules against email messages in a sandboxed environment.
-type Engine struct{}
+type Engine struct {
+	kiroClient *KiroClient
+}
 
 // New creates a new rule engine.
 func New() *Engine {
 	return &Engine{}
+}
+
+// NewWithKiro creates a new rule engine with Kiro semantic evaluation support.
+func NewWithKiro(kiroClient *KiroClient) *Engine {
+	return &Engine{kiroClient: kiroClient}
+}
+
+// SetKiroClient sets the Kiro client for semantic evaluation.
+func (e *Engine) SetKiroClient(client *KiroClient) {
+	e.kiroClient = client
 }
 
 // Evaluate runs a single rule's Lua code against an email context.
@@ -44,6 +56,9 @@ func (e *Engine) Evaluate(rule *models.Rule, email *models.EmailContext) (*model
 
 	// Register action functions
 	registerActions(L)
+
+	// Register kiro namespace for semantic evaluation
+	registerKiroNamespace(L, e.kiroClient, email)
 
 	// Execute the rule
 	if err := L.DoString(rule.LuaCode); err != nil {

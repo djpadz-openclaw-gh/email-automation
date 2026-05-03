@@ -56,8 +56,13 @@ func main() {
 		}
 	}
 
-	// Rule engine
-	eng := engine.New()
+	// Rule engine with Kiro semantic evaluation
+	var kiroClient *engine.KiroClient
+	if cfg.KiroAPIKey != "" {
+		kiroClient = engine.NewKiroClient(cfg.KiroAPIKey, cfg.KiroAPIURL)
+		log.Info().Msg("kiro semantic evaluation enabled")
+	}
+	eng := engine.NewWithKiro(kiroClient)
 
 	// Telegram notifier
 	telegram := notifier.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID)

@@ -695,3 +695,56 @@ func TestEngineMalformedRule(t *testing.T) {
 		})
 	}
 }
+
+func TestEngineKiroNamespace_Available(t *testing.T) {
+	// Without a kiro client, kiro functions should still be available but return false
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-kiro-no-client",
+		LuaCode: `
+-- kiro table should exist even without API key
+assert(type(kiro) == "table")
+assert(type(kiro.classify) == "function")
+assert(type(kiro.is_actionable) == "function")
+
+-- Without API key, kiro.classify should return false gracefully
+if kiro.classify(email, "Is this important?") then
+    return keep("important")
+end
+return skip()
+`,
+	}
+
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "skip" {
+		t.Errorf("expected skip (kiro without API key returns false), got %s", result.Action)
+	}
+}
+
+func TestEngineKiroNamespace_WithClient(t *testing.T) {
+	// With a kiro client (but no real API key), functions should still not panic
+	kiroClient := NewKiroClient("", "")
+	eng := NewWithKiro(kiroClient)
+	rule := &models.Rule{
+		Name: "test-kiro-with-client",
+		LuaCode: `
+assert(type(kiro) == "table")
+-- is_actionable should return false when API key is empty
+if kiro.is_actionable(email) then
+    return keep("actionable")
+end
+return archive("not actionable")
+`,
+	}
+
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "archive" {
+		t.Errorf("expected archive (kiro without API key returns false), got %s", result.Action)
+	}
+}
