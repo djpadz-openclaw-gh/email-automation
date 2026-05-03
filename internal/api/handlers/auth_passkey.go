@@ -296,6 +296,8 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 		Credentials: credentials,
 	}
 
+	log.Info().Int64("user_id", user.ID).Str("username", user.Username).Int("num_credentials", len(credentials)).Msg("validating passkey login")
+
 	// Try user-specific session first, then discoverable
 	sessionKey := fmt.Sprintf("auth_%d", user.ID)
 	session, ok := h.getSession(sessionKey)
@@ -305,12 +307,15 @@ func (h *AuthHandlers) PasskeyAuthenticateComplete(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "no authentication in progress"})
 		}
 		sessionKey = "auth_discoverable"
+		log.Info().Msg("using discoverable login session")
+	} else {
+		log.Info().Str("session_key", sessionKey).Msg("using user-specific login session")
 	}
 	defer h.deleteSession(sessionKey)
 
 	credential, err := h.WebAuthn.ValidateLogin(wanUser, *session, parsedResponse)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to validate passkey login")
+		log.Error().Err(err).Int64("user_id", user.ID).Str("session_key", sessionKey).Msg("failed to validate passkey login")
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
