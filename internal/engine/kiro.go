@@ -115,9 +115,25 @@ type kiroAPIRequest struct {
 	Messages  []kiroAPIMessage `json:"messages"`
 }
 
+// kiroAPIMessage supports both text-only and multimodal content.
+// Content is either a string (text-only) or []kiroContentBlock (multimodal).
 type kiroAPIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+// kiroContentBlock represents a single content block in a multimodal message.
+type kiroContentBlock struct {
+	Type   string            `json:"type"`
+	Text   string            `json:"text,omitempty"`
+	Source *kiroImageSource  `json:"source,omitempty"`
+}
+
+// kiroImageSource holds the base64-encoded image data for the Anthropic vision API.
+type kiroImageSource struct {
+	Type      string `json:"type"`       // always "base64"
+	MediaType string `json:"media_type"` // e.g. "image/jpeg"
+	Data      string `json:"data"`       // base64-encoded image bytes
 }
 
 type kiroAPIResponse struct {
@@ -132,13 +148,19 @@ type kiroAPIResponse struct {
 }
 
 // classify asks Kiro whether an email matches a semantic criteria.
+// When the email has image attachments, they are sent as vision content blocks
+// to the Anthropic API for visual analysis (e.g., detecting fake invoices in images).
 func (k *KiroClient) classify(email *models.EmailContext, question string) (bool, error) {
 	if !k.Enabled() {
 		return false, fmt.Errorf("kiro API key not configured")
 	}
 
-	// Check cache
-	key := cacheKey("classify", email.MessageID, question)
+	// Check cache (include image presence in cache key to differentiate)
+	cacheTag := "classify"
+	if len(email.ImageAttachments) > 0 {
+		cacheTag = "classify_vision"
+	}
+	key := cacheKey(cacheTag, email.MessageID, question)
 	if result, ok := k.cache.get(key); ok {
 		log.Debug().Str("question", question).Bool("cached_result", result).Msg("kiro.classify cache hit")
 		return result, nil
@@ -146,11 +168,24 @@ func (k *KiroClient) classify(email *models.EmailContext, question string) (bool
 
 	emailSummary := formatEmailForKiro(email)
 
-	systemPrompt := `You are an email classification assistant. You will be given an email and a yes/no question about it. Answer ONLY with "yes" or "no" — nothing else.`
+	var systemPrompt string
+	var result bool
+	var err error
 
-	userMessage := fmt.Sprintf("Email:\n%s\n\nQuestion: %s", emailSummary, question)
+	if len(email.ImageAttachments) > 0 {
+		// Vision-enabled classification: send images + text to the API
+		systemPrompt = `You are an email classification assistant with vision capabilities. You will be given an email (with text and image attachments) and a yes/no question about it. Analyze BOTH the email text AND the attached images to answer the question. Look carefully at the visual content of images — text rendered in images, logos, layouts, and visual patterns are all relevant. Answer ONLY with "yes" or "no" — nothing else.`
 
-	result, err := k.askYesNo(systemPrompt, userMessage)
+		userText := fmt.Sprintf("Email:\n%s\n\nQuestion: %s", emailSummary, question)
+		result, err = k.askYesNoWithImages(systemPrompt, userText, email.ImageAttachments)
+	} else {
+		// Text-only classification
+		systemPrompt = `You are an email classification assistant. You will be given an email and a yes/no question about it. Answer ONLY with "yes" or "no" — nothing else.`
+
+		userMessage := fmt.Sprintf("Email:\n%s\n\nQuestion: %s", emailSummary, question)
+		result, err = k.askYesNo(systemPrompt, userMessage)
+	}
+
 	if err != nil {
 		return false, err
 	}
@@ -190,14 +225,18 @@ func (k *KiroClient) isActionable(email *models.EmailContext) (bool, error) {
 }
 
 // isFakeInvoice asks Kiro whether an email appears to be a fake or suspicious invoice.
-// It uses OCR text from image attachments when available for better detection.
+// It uses both OCR text and actual image attachments (via vision) when available.
 func (k *KiroClient) isFakeInvoice(email *models.EmailContext) (bool, error) {
 	if !k.Enabled() {
 		return false, fmt.Errorf("kiro API key not configured")
 	}
 
 	// Check cache
-	key := cacheKey("is_fake_invoice", email.MessageID, "")
+	cacheTag := "is_fake_invoice"
+	if len(email.ImageAttachments) > 0 {
+		cacheTag = "is_fake_invoice_vision"
+	}
+	key := cacheKey(cacheTag, email.MessageID, "")
 	if result, ok := k.cache.get(key); ok {
 		log.Debug().Bool("cached_result", result).Msg("kiro.is_fake_invoice cache hit")
 		return result, nil
@@ -210,7 +249,26 @@ func (k *KiroClient) isFakeInvoice(email *models.EmailContext) (bool, error) {
 		emailSummary += fmt.Sprintf("\nOCR text extracted from image attachments:\n%s\n", email.OCRText)
 	}
 
-	systemPrompt := `You are a fraud detection assistant specializing in invoice and payment scams. Analyze the email (and any OCR text from attached images) for signs of a fake or suspicious invoice. Look for:
+	var systemPrompt string
+	var result bool
+	var err error
+
+	if len(email.ImageAttachments) > 0 {
+		systemPrompt = `You are a fraud detection assistant with vision capabilities, specializing in invoice and payment scams. Analyze the email text AND the attached images for signs of a fake or suspicious invoice. Pay special attention to:
+- Images that look like invoices, receipts, or payment confirmations (especially McAfee, Geek Squad, Norton, PayPal)
+- Text rendered in images that differs from the email body (a common scam tactic)
+- Fake logos, distorted branding, or low-quality reproductions
+- Phone numbers in images urging you to call
+- Urgency pressure ("pay immediately", "account will be suspended")
+- Mismatched sender domains vs claimed company
+- Suspicious payment details or unusual amounts
+
+Answer ONLY with "yes" (suspicious/fake) or "no" (appears legitimate) — nothing else.`
+
+		userMessage := fmt.Sprintf("Email:\n%s\n\nDoes this appear to be a fake, fraudulent, or suspicious invoice?", emailSummary)
+		result, err = k.askYesNoWithImages(systemPrompt, userMessage, email.ImageAttachments)
+	} else {
+		systemPrompt = `You are a fraud detection assistant specializing in invoice and payment scams. Analyze the email (and any OCR text from attached images) for signs of a fake or suspicious invoice. Look for:
 - Unexpected invoices from unknown vendors
 - Urgency pressure ("pay immediately", "account will be suspended")
 - Mismatched sender domains vs claimed company
@@ -221,9 +279,10 @@ func (k *KiroClient) isFakeInvoice(email *models.EmailContext) (bool, error) {
 
 Answer ONLY with "yes" (suspicious/fake) or "no" (appears legitimate) — nothing else.`
 
-	userMessage := fmt.Sprintf("Email:\n%s\n\nDoes this appear to be a fake, fraudulent, or suspicious invoice?", emailSummary)
+		userMessage := fmt.Sprintf("Email:\n%s\n\nDoes this appear to be a fake, fraudulent, or suspicious invoice?", emailSummary)
+		result, err = k.askYesNo(systemPrompt, userMessage)
+	}
 
-	result, err := k.askYesNo(systemPrompt, userMessage)
 	if err != nil {
 		return false, err
 	}
@@ -233,7 +292,47 @@ Answer ONLY with "yes" (suspicious/fake) or "no" (appears legitimate) — nothin
 	return result, nil
 }
 
-// askYesNo sends a prompt to the API and interprets the response as yes/no.
+// askYesNoWithImages sends a multimodal prompt (text + images) to the Anthropic API
+// and interprets the response as yes/no. Uses claude-sonnet for vision capability.
+func (k *KiroClient) askYesNoWithImages(systemPrompt, userText string, images []models.ImageAttachment) (bool, error) {
+	// Build content blocks: images first, then the text question
+	var contentBlocks []kiroContentBlock
+
+	for _, img := range images {
+		contentBlocks = append(contentBlocks, kiroContentBlock{
+			Type: "image",
+			Source: &kiroImageSource{
+				Type:      "base64",
+				MediaType: img.MediaType,
+				Data:      img.Data,
+			},
+		})
+	}
+
+	contentBlocks = append(contentBlocks, kiroContentBlock{
+		Type: "text",
+		Text: userText,
+	})
+
+	// Use claude-sonnet for vision — haiku doesn't support images well
+	reqBody := kiroAPIRequest{
+		Model:     "claude-sonnet-4-20250514",
+		MaxTokens: 10,
+		System:    systemPrompt,
+		Messages: []kiroAPIMessage{
+			{Role: "user", Content: contentBlocks},
+		},
+	}
+
+	log.Info().
+		Int("image_count", len(images)).
+		Str("model", reqBody.Model).
+		Msg("sending vision request to kiro API")
+
+	return k.doYesNoRequest(reqBody)
+}
+
+// askYesNo sends a text-only prompt to the API and interprets the response as yes/no.
 func (k *KiroClient) askYesNo(systemPrompt, userMessage string) (bool, error) {
 	reqBody := kiroAPIRequest{
 		Model:     "claude-haiku-4.5",
@@ -243,6 +342,12 @@ func (k *KiroClient) askYesNo(systemPrompt, userMessage string) (bool, error) {
 			{Role: "user", Content: userMessage},
 		},
 	}
+
+	return k.doYesNoRequest(reqBody)
+}
+
+// doYesNoRequest executes the API request and interprets the response as yes/no.
+func (k *KiroClient) doYesNoRequest(reqBody kiroAPIRequest) (bool, error) {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {

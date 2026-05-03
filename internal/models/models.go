@@ -76,6 +76,14 @@ type DeferredAction struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// ImageAttachment holds a base64-encoded image extracted from an email for
+// vision-based analysis via the Anthropic API.
+type ImageAttachment struct {
+	Filename  string `json:"filename"`
+	MediaType string `json:"media_type"` // e.g. "image/jpeg", "image/png"
+	Data      string `json:"data"`       // base64-encoded image bytes
+}
+
 // EmailContext is the data passed to Lua rules for evaluation.
 type EmailContext struct {
 	MessageID     string            `json:"message_id"`
@@ -96,6 +104,8 @@ type EmailContext struct {
 	OCRText       string            `json:"ocr_text,omitempty"`
 	// Whether image attachments were detected
 	HasImages     bool              `json:"has_images"`
+	// Actual image attachment data for vision-based analysis
+	ImageAttachments []ImageAttachment `json:"image_attachments,omitempty"`
 }
 
 // RuleResult is what a Lua rule returns after evaluation.

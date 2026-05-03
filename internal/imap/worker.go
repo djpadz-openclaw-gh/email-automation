@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -396,6 +397,18 @@ func (w *Worker) processBatch(ctx context.Context, client *imapclient.Client, ui
 			continue
 		}
 
+		// Fetch image attachment bodies for vision analysis if images were detected
+		if email.HasImages && buf.BodyStructure != nil {
+			imageParts := findImageParts(buf.BodyStructure, nil)
+			if len(imageParts) > 0 {
+				log.Info().
+					Str("message_id", email.MessageID).
+					Int("image_count", len(imageParts)).
+					Msg("fetching image attachments for vision analysis")
+				email.ImageAttachments = w.fetchImageAttachments(client, buf.UID, imageParts)
+			}
+		}
+
 		// Process through rule engine
 		if err := w.processMessage(ctx, client, email, buf.UID); err != nil {
 			log.Error().Err(err).Str("message_id", email.MessageID).Msg("failed to process message")
@@ -530,6 +543,14 @@ func parseHeadersSimple(raw []byte) map[string]string {
 	return headers
 }
 
+// imagePartInfo holds the MIME part path and metadata for an image attachment.
+type imagePartInfo struct {
+	Part      []int  // MIME part path, e.g. [1, 2] for part 1.2
+	MediaType string // e.g. "image/jpeg"
+	Filename  string
+	Size      uint32 // estimated size from body structure
+}
+
 // extractAttachmentInfo walks the body structure to find attachments.
 func extractAttachmentInfo(bs imap.BodyStructure) (names []string, types []string) {
 	switch s := bs.(type) {
@@ -554,6 +575,132 @@ func extractAttachmentInfo(bs imap.BodyStructure) (names []string, types []strin
 		}
 	}
 	return
+}
+
+// maxImageSize is the maximum size per image attachment to fetch (5 MB).
+const maxImageSize = 5 * 1024 * 1024
+
+// maxImageAttachments is the maximum number of image attachments to fetch per email.
+const maxImageAttachments = 4
+
+// findImageParts walks the body structure and returns info about image parts
+// suitable for vision analysis. It tracks the MIME part path for fetching.
+func findImageParts(bs imap.BodyStructure, path []int) []imagePartInfo {
+	var parts []imagePartInfo
+
+	switch s := bs.(type) {
+	case *imap.BodyStructureSinglePart:
+		mt := strings.ToLower(s.MediaType())
+		if strings.HasPrefix(mt, "image/") {
+			// Only include common image types that Anthropic supports
+			switch mt {
+			case "image/jpeg", "image/png", "image/gif", "image/webp":
+				if s.Size <= maxImageSize {
+					partPath := make([]int, len(path))
+					copy(partPath, path)
+					parts = append(parts, imagePartInfo{
+						Part:      partPath,
+						MediaType: mt,
+						Filename:  s.Filename(),
+						Size:      s.Size,
+					})
+				}
+			}
+		}
+	case *imap.BodyStructureMultiPart:
+		for i, child := range s.Children {
+			childPath := append(append([]int{}, path...), i+1) // MIME parts are 1-indexed
+			parts = append(parts, findImageParts(child, childPath)...)
+		}
+	}
+
+	return parts
+}
+
+// fetchImageAttachments fetches the actual image data for the given image parts
+// from IMAP and returns them as base64-encoded ImageAttachment structs.
+func (w *Worker) fetchImageAttachments(client *imapclient.Client, uid imap.UID, imageParts []imagePartInfo) []models.ImageAttachment {
+	if len(imageParts) == 0 {
+		return nil
+	}
+
+	// Limit the number of images we fetch
+	if len(imageParts) > maxImageAttachments {
+		imageParts = imageParts[:maxImageAttachments]
+	}
+
+	// Build fetch options for each image part
+	var bodySections []*imap.FetchItemBodySection
+	for _, ip := range imageParts {
+		bodySections = append(bodySections, &imap.FetchItemBodySection{
+			Part: ip.Part,
+			Peek: true, // Don't mark as seen
+		})
+	}
+
+	uidSet := imap.UIDSetNum(uid)
+	fetchOptions := &imap.FetchOptions{
+		UID:         true,
+		BodySection: bodySections,
+	}
+
+	fetchCmd := client.Fetch(uidSet, fetchOptions)
+	defer fetchCmd.Close()
+
+	var attachments []models.ImageAttachment
+
+	for {
+		msg := fetchCmd.Next()
+		if msg == nil {
+			break
+		}
+
+		buf, err := msg.Collect()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to collect image attachment data")
+			continue
+		}
+
+		for _, section := range buf.BodySection {
+			if len(section.Bytes) == 0 {
+				continue
+			}
+
+			// Match this section back to our image part info
+			for _, ip := range imageParts {
+				if partsEqual(section.Section.Part, ip.Part) {
+					// The data from IMAP may already be decoded or may need base64 encoding
+					encoded := base64.StdEncoding.EncodeToString(section.Bytes)
+					attachments = append(attachments, models.ImageAttachment{
+						Filename:  ip.Filename,
+						MediaType: ip.MediaType,
+						Data:      encoded,
+					})
+					log.Debug().
+						Str("filename", ip.Filename).
+						Str("media_type", ip.MediaType).
+						Int("size", len(section.Bytes)).
+						Msg("fetched image attachment for vision analysis")
+					break
+				}
+			}
+		}
+	}
+
+	return attachments
+}
+
+// partsEqual compares two MIME part paths for equality.
+func partsEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // hasImageAttachments checks if any attachment types are images.

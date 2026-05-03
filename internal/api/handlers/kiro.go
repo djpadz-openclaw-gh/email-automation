@@ -90,16 +90,24 @@ Helper functions:
 
 Kiro AI functions (for SEMANTIC evaluation only):
 - kiro.classify(email, question) — ask AI a yes/no question about the email
+  VISION CAPABLE: When the email has image attachments, kiro.classify() automatically
+  sends the actual images to the AI for visual analysis. It can see logos, layouts,
+  text rendered in images, and visual patterns — not just OCR text.
 - kiro.is_actionable(email) — ask AI if the email requires action
-- kiro.is_fake_invoice(email) — ask AI if an invoice/payment email looks fraudulent (uses OCR text from images)
+- kiro.is_fake_invoice(email) — ask AI if an invoice/payment email looks fraudulent (uses vision + OCR)
 
 Additional email fields for images and OCR:
 - email.ocr_text (string) — text extracted from image attachments via OCR (always available when images are present)
 - email.has_images (boolean) — whether the email has image attachments
+- Image attachments are automatically passed to kiro.classify() and kiro.is_fake_invoice() for vision analysis
 
-IMPORTANT: kiro.classify() has access to email.ocr_text automatically. When it evaluates an email,
-it sees the full email context INCLUDING any OCR-extracted text from image attachments. This means
-kiro.classify() can answer questions about what text appears in images attached to the email.
+IMPORTANT: kiro.classify() now has VISION capabilities. When an email has image attachments,
+the actual images are sent to the AI alongside the email text. This means kiro.classify() can:
+- See what an image looks like (logos, layouts, colors, formatting)
+- Read text rendered in images (even if OCR missed it)
+- Detect visual patterns (fake invoices, phishing screenshots, scam receipts)
+- Analyze image quality and authenticity cues
+This is MORE POWERFUL than just OCR text — it's full visual understanding.
 
 IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
 
@@ -119,8 +127,10 @@ IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
    When the user mentions "picture of", "image of", "image contains", "image looks like",
    "screenshot of", "image with text", "photo of", or any reference to visual content in
    attachments, this is a signal to use kiro.classify() — NOT filename/MIME type checking.
-   The AI can see OCR text from images, so ask it about the image content:
-   - "image that looks like a McAfee invoice" → kiro.classify(email, "Does this email have an image containing McAfee or Geek Squad invoice text?")
+   kiro.classify() has VISION capabilities — when images are attached, it sends the actual
+   images to the AI for visual analysis. It can see logos, layouts, text in images, and
+   visual patterns. Ask it about the image content:
+   - "image that looks like a McAfee invoice" → kiro.classify(email, "Does this email have an image that looks like a McAfee or Geek Squad invoice?")
    - "screenshot of a bank login page" → kiro.classify(email, "Does this email contain an image that appears to be a bank login page?")
    - "picture of a receipt" → kiro.classify(email, "Does this email have an image that looks like a receipt?")
    - "image with the words 'You owe'" → kiro.classify(email, "Does this email have an image containing the text 'You owe'?")
