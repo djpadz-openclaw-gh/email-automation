@@ -444,5 +444,9 @@ func emailToLua(L *lua.LState, email *models.EmailContext) *lua.LTable {
 	// Date as ISO string
 	tbl.RawSetString("date", lua.LString(email.Date.Format(time.RFC3339)))
 
+	// OCR text from image attachments
+	tbl.RawSetString("ocr_text", lua.LString(email.OCRText))
+	tbl.RawSetString("has_images", lua.LBool(email.HasImages))
+
 	return tbl
 }

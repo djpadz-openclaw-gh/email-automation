@@ -109,6 +109,11 @@ Helper functions:
 Kiro AI functions (for SEMANTIC evaluation only):
 - kiro.classify(email, question) - ask AI a yes/no question about the email
 - kiro.is_actionable(email) - ask AI if the email requires action from the recipient
+- kiro.is_fake_invoice(email) - ask AI if an invoice/payment email looks fraudulent (uses OCR text)
+
+OCR fields (populated when image attachments are detected):
+- email.ocr_text - text extracted from image attachments via OCR
+- email.has_images - whether the email has image attachments
 
 Guidelines:
 - PREFER simple string matching (contains, domain_of, etc.) for concrete criteria

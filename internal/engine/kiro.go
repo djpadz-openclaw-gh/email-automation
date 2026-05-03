@@ -189,6 +189,50 @@ func (k *KiroClient) isActionable(email *models.EmailContext) (bool, error) {
 	return result, nil
 }
 
+// isFakeInvoice asks Kiro whether an email appears to be a fake or suspicious invoice.
+// It uses OCR text from image attachments when available for better detection.
+func (k *KiroClient) isFakeInvoice(email *models.EmailContext) (bool, error) {
+	if !k.Enabled() {
+		return false, fmt.Errorf("kiro API key not configured")
+	}
+
+	// Check cache
+	key := cacheKey("is_fake_invoice", email.MessageID, "")
+	if result, ok := k.cache.get(key); ok {
+		log.Debug().Bool("cached_result", result).Msg("kiro.is_fake_invoice cache hit")
+		return result, nil
+	}
+
+	emailSummary := formatEmailForKiro(email)
+
+	// Include OCR text if available
+	if email.OCRText != "" {
+		emailSummary += fmt.Sprintf("\nOCR text extracted from image attachments:\n%s\n", email.OCRText)
+	}
+
+	systemPrompt := `You are a fraud detection assistant specializing in invoice and payment scams. Analyze the email (and any OCR text from attached images) for signs of a fake or suspicious invoice. Look for:
+- Unexpected invoices from unknown vendors
+- Urgency pressure ("pay immediately", "account will be suspended")
+- Mismatched sender domains vs claimed company
+- Suspicious payment details or unusual amounts
+- Poor grammar/formatting typical of scam emails
+- Requests to change payment methods or bank details
+- Invoices for services never ordered
+
+Answer ONLY with "yes" (suspicious/fake) or "no" (appears legitimate) — nothing else.`
+
+	userMessage := fmt.Sprintf("Email:\n%s\n\nDoes this appear to be a fake, fraudulent, or suspicious invoice?", emailSummary)
+
+	result, err := k.askYesNo(systemPrompt, userMessage)
+	if err != nil {
+		return false, err
+	}
+
+	// Cache the result
+	k.cache.set(key, result)
+	return result, nil
+}
+
 // askYesNo sends a prompt to the API and interprets the response as yes/no.
 func (k *KiroClient) askYesNo(systemPrompt, userMessage string) (bool, error) {
 	reqBody := kiroAPIRequest{
@@ -323,6 +367,27 @@ func registerKiroNamespace(L *lua.LState, kiroClient *KiroClient, email *models.
 		result, err := kiroClient.isActionable(email)
 		if err != nil {
 			log.Error().Err(err).Msg("kiro.is_actionable failed")
+			L.Push(lua.LBool(false))
+			return 1
+		}
+
+		L.Push(lua.LBool(result))
+		return 1
+	}))
+
+	// kiro.is_fake_invoice(email?) -> boolean
+	// Ask Kiro if the email appears to be a fake/suspicious invoice.
+	// Uses OCR text from image attachments when available.
+	kiroTable.RawSetString("is_fake_invoice", L.NewFunction(func(L *lua.LState) int {
+		if kiroClient == nil || !kiroClient.Enabled() {
+			log.Warn().Msg("kiro.is_fake_invoice called but Kiro API is not configured")
+			L.Push(lua.LBool(false))
+			return 1
+		}
+
+		result, err := kiroClient.isFakeInvoice(email)
+		if err != nil {
+			log.Error().Err(err).Msg("kiro.is_fake_invoice failed")
 			L.Push(lua.LBool(false))
 			return 1
 		}

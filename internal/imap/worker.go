@@ -476,6 +476,7 @@ func (w *Worker) bufferToEmailContext(buf *imapclient.FetchMessageBuffer) *model
 		Headers:         headers,
 		Folder:          "INBOX",
 		AccountID:       w.account.ID,
+		HasImages:       hasImageAttachments(attachmentTypes),
 	}
 }
 
@@ -553,6 +554,17 @@ func extractAttachmentInfo(bs imap.BodyStructure) (names []string, types []strin
 		}
 	}
 	return
+}
+
+// hasImageAttachments checks if any attachment types are images.
+func hasImageAttachments(attachmentTypes []string) bool {
+	for _, ct := range attachmentTypes {
+		lower := strings.ToLower(ct)
+		if strings.HasPrefix(lower, "image/") {
+			return true
+		}
+	}
+	return false
 }
 
 // processMessage evaluates a single message against all active rules.

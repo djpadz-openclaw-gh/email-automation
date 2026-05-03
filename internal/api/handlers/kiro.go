@@ -91,6 +91,11 @@ Helper functions:
 Kiro AI functions (for SEMANTIC evaluation only):
 - kiro.classify(email, question) — ask AI a yes/no question about the email
 - kiro.is_actionable(email) — ask AI if the email requires action
+- kiro.is_fake_invoice(email) — ask AI if an invoice/payment email looks fraudulent (uses OCR text from images)
+
+Additional email fields for OCR:
+- email.ocr_text (string) — text extracted from image attachments via OCR
+- email.has_images (boolean) — whether the email has image attachments
 
 IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
 
@@ -109,6 +114,10 @@ IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
 3. Use kiro.is_actionable() for action/triage questions:
    - "actionable emails" → kiro.is_actionable(email)
    - "emails I need to respond to" → kiro.is_actionable(email)
+
+4. Use kiro.is_fake_invoice() for fraud detection:
+   - "suspicious invoices" → kiro.is_fake_invoice(email)
+   - "fake payment requests" → kiro.is_fake_invoice(email)
 
 Rules should:
 1. Start with a comment block describing the rule

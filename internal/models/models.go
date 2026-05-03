@@ -92,6 +92,10 @@ type EmailContext struct {
 	Headers       map[string]string `json:"headers"`
 	Folder        string            `json:"folder"`
 	AccountID     int64             `json:"account_id"`
+	// OCR text extracted from image attachments (invoices, receipts, etc.)
+	OCRText       string            `json:"ocr_text,omitempty"`
+	// Whether image attachments were detected
+	HasImages     bool              `json:"has_images"`
 }
 
 // RuleResult is what a Lua rule returns after evaluation.
