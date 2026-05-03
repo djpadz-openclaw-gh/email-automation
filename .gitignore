@@ -54,3 +54,4 @@ tests/e2e/results/
 *.key
 credentials.json
 /server
+tests/e2e/screenshots-latest/
