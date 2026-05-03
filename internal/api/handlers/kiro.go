@@ -93,9 +93,13 @@ Kiro AI functions (for SEMANTIC evaluation only):
 - kiro.is_actionable(email) — ask AI if the email requires action
 - kiro.is_fake_invoice(email) — ask AI if an invoice/payment email looks fraudulent (uses OCR text from images)
 
-Additional email fields for OCR:
-- email.ocr_text (string) — text extracted from image attachments via OCR
+Additional email fields for images and OCR:
+- email.ocr_text (string) — text extracted from image attachments via OCR (always available when images are present)
 - email.has_images (boolean) — whether the email has image attachments
+
+IMPORTANT: kiro.classify() has access to email.ocr_text automatically. When it evaluates an email,
+it sees the full email context INCLUDING any OCR-extracted text from image attachments. This means
+kiro.classify() can answer questions about what text appears in images attached to the email.
 
 IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
 
@@ -111,11 +115,23 @@ IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
    - "spam that got through" → kiro.classify(email, "Does this look like spam?")
    - "emails that need a reply" → kiro.is_actionable(email)
 
-3. Use kiro.is_actionable() for action/triage questions:
+3. Use kiro.classify() for IMAGE-BASED detection:
+   When the user mentions "picture of", "image of", "image contains", "image looks like",
+   "screenshot of", "image with text", "photo of", or any reference to visual content in
+   attachments, this is a signal to use kiro.classify() — NOT filename/MIME type checking.
+   The AI can see OCR text from images, so ask it about the image content:
+   - "image that looks like a McAfee invoice" → kiro.classify(email, "Does this email have an image containing McAfee or Geek Squad invoice text?")
+   - "screenshot of a bank login page" → kiro.classify(email, "Does this email contain an image that appears to be a bank login page?")
+   - "picture of a receipt" → kiro.classify(email, "Does this email have an image that looks like a receipt?")
+   - "image with the words 'You owe'" → kiro.classify(email, "Does this email have an image containing the text 'You owe'?")
+   You can also check email.has_images first as a fast pre-filter before calling kiro.classify().
+   You can also check email.ocr_text directly with contains() for exact text matches in images.
+
+4. Use kiro.is_actionable() for action/triage questions:
    - "actionable emails" → kiro.is_actionable(email)
    - "emails I need to respond to" → kiro.is_actionable(email)
 
-4. Use kiro.is_fake_invoice() for fraud detection:
+5. Use kiro.is_fake_invoice() for fraud detection:
    - "suspicious invoices" → kiro.is_fake_invoice(email)
    - "fake payment requests" → kiro.is_fake_invoice(email)
 
@@ -168,6 +184,53 @@ if kiro.is_actionable(email) then
 end
 
 return archive("Non-actionable team email")
+` + "```" + `
+
+Example 4 - Image-based detection (kiro + OCR):
+` + "```lua" + `
+-- Rule: Fake McAfee/Geek Squad Invoices
+-- Flag emails with images that look like McAfee or Geek Squad invoices as junk.
+
+if not email.has_images then return skip() end
+
+if kiro.classify(email, "Does this email have an image containing McAfee or Geek Squad invoice or renewal text?") then
+    return move("Junk", "Image contains McAfee/Geek Squad invoice text (likely scam)")
+end
+
+return skip()
+` + "```" + `
+
+Example 5 - Image OCR with direct text matching:
+` + "```lua" + `
+-- Rule: Bank Login Screenshots
+-- Flag emails containing screenshots of bank login pages.
+
+if not email.has_images then return skip() end
+
+-- Quick check: does OCR text mention banking keywords?
+local ocr = email.ocr_text:lower()
+if not contains_any(ocr, {"login", "sign in", "password", "account"}) then return skip() end
+
+-- Semantic check: does it actually look like a bank login page?
+if kiro.classify(email, "Does this email contain an image that appears to be a bank or financial login page?") then
+    return move("Junk", "Image appears to be a bank login page screenshot (phishing)")
+end
+
+return skip()
+` + "```" + `
+
+Example 6 - Image content with OCR text matching:
+` + "```lua" + `
+-- Rule: Receipt Images
+-- Move emails with receipt images to @Receipts.
+
+if not email.has_images then return skip() end
+
+if kiro.classify(email, "Does this email have an image that looks like a purchase receipt or order confirmation?") then
+    return move("@Receipts", "Image contains receipt detected by AI")
+end
+
+return skip()
 ` + "```" + `
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
