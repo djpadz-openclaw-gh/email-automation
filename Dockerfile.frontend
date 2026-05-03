@@ -8,6 +8,8 @@ RUN npm ci
 
 COPY frontend/ .
 
+ENV NEXT_PUBLIC_API_URL=http://api.email-automation.svc.cluster.local:8080
+
 RUN npm run build
 
 # Runtime stage
