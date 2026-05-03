@@ -65,6 +65,12 @@ func (h *AuthHandlers) PasskeyRegisterBegin(c *fiber.Ctx) error {
 
 // PasskeyRegisterComplete handles POST /auth/passkey/register/complete
 func (h *AuthHandlers) PasskeyRegisterComplete(c *fiber.Ctx) error {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Msg("panic in PasskeyRegisterComplete")
+		}
+	}()
+
 	userID := c.Locals("user_id").(int64)
 
 	user, err := h.DB.GetUserByID(c.Context(), userID)
