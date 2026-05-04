@@ -52,8 +52,9 @@ func New(database *db.DB, eng *engine.Engine, bus *natsbus.Bus, telegram *notifi
 // Start begins consuming messages from the email.incoming stream.
 func (c *Consumer) Start(ctx context.Context) error {
 	// Create durable consumer with deliver group for horizontal scaling across pods
+	// Use a new consumer name to force creation from the beginning of the stream
 	consumer, err := c.bus.CreateOrUpdateConsumer(ctx, natsbus.StreamIncoming, jetstream.ConsumerConfig{
-		Durable:        natsbus.ConsumerRulesEngine,
+		Durable:        natsbus.ConsumerRulesEngine + "-v2",
 		DeliverPolicy:  jetstream.DeliverAllPolicy, // Start from the beginning of the stream
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		AckWait:        2 * time.Minute, // Allow time for Kiro API calls + IMAP actions
