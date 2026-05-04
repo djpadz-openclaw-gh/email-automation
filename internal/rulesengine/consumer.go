@@ -180,12 +180,14 @@ func (c *Consumer) handleMessage(ctx context.Context, msg jetstream.Msg) {
 	emailCtx := eventToEmailContext(&event)
 
 	// Load active rules for this tenant
+	logger.Debug().Msg("loading active rules")
 	rules, err := c.db.ListActiveRules(ctx, event.TenantID)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to list active rules")
 		_ = msg.Nak()
 		return
 	}
+	logger.Debug().Int("rule_count", len(rules)).Msg("loaded active rules")
 
 	// Check if the tenant's user has AI enabled
 	aiEnabled := true
@@ -204,8 +206,10 @@ func (c *Consumer) handleMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	// Evaluate all rules with AI permission context
+	logger.Debug().Msg("evaluating rules")
 	opts := &engine.EvaluateOptions{AIEnabled: aiEnabled}
 	result, matchedRule, err := c.engine.EvaluateAllWithOptions(rules, emailCtx, opts)
+	logger.Debug().Str("action", result.Action).Msg("rule evaluation completed")
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to evaluate rules")
 		_ = msg.Nak()
