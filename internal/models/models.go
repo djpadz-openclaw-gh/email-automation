@@ -44,6 +44,7 @@ type Rule struct {
 	Active      bool      `json:"active"`
 	Source      string    `json:"source"`              // "manual" or "auto-learned"
 	Approved    bool      `json:"approved"`             // auto-learned rules start unapproved
+	UsesAI      bool      `json:"uses_ai"`              // true if lua_code contains kiro.* calls
 	AccountIDs  []int64   `json:"account_ids,omitempty"` // empty = all accounts
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

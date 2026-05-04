@@ -349,6 +349,11 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
                         Auto-learned
                       </span>
                     )}
+                    {rule.uses_ai && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-400" title="This rule uses AI (kiro.*) calls">
+                        🤖 AI
+                      </span>
+                    )}
                   </div>
                   {rule.description && (
                     <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 truncate ml-5">

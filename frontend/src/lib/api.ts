@@ -11,6 +11,7 @@ export interface Rule {
   active: boolean;
   source: string;    // 'manual' or 'auto-learned'
   approved: boolean;
+  uses_ai: boolean;  // true if lua_code contains kiro.* calls
   created_at: string;
   updated_at: string;
 }

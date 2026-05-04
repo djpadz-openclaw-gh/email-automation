@@ -69,7 +69,10 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const [scanLimit, setScanLimit] = useState<number>(0); // 0 = all
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Detect kiro.classify usage
+  // Detect kiro.* usage (any kiro function call)
+  const usesAi = /\bkiro\.\w+\s*\(/.test(luaCode);
+
+  // Detect kiro.classify usage specifically (for the performance warning)
   const usesAiClassify = /kiro\.classify\s*\(/.test(luaCode);
 
   // Bidirectional editor state
@@ -291,6 +294,20 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
                   className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                 />
                 <span className="text-sm text-gray-700 dark:text-gray-300">Active</span>
+              </label>
+              <label className="flex items-center gap-2 ml-6" title="Auto-detected: this rule uses AI (kiro.*) function calls">
+                <input
+                  type="checkbox"
+                  checked={usesAi}
+                  disabled
+                  className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 disabled:opacity-70"
+                />
+                <span className={`text-sm ${usesAi ? 'text-purple-700 dark:text-purple-400 font-medium' : 'text-gray-400 dark:text-gray-500'}`}>
+                  🤖 Uses AI
+                </span>
+                {usesAi && (
+                  <span className="text-xs text-gray-400 dark:text-gray-500">(auto-detected)</span>
+                )}
               </label>
           </div>
 

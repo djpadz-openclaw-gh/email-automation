@@ -319,19 +319,19 @@ func (db *DB) CreateRule(ctx context.Context, r *models.Rule) error {
 		r.Source = "manual"
 	}
 	return db.Pool.QueryRow(ctx,
-		`INSERT INTO rules (tenant_id, name, description, lua_code, priority, active, source, approved)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO rules (tenant_id, name, description, lua_code, priority, active, source, approved, uses_ai)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id, created_at, updated_at`,
-		r.TenantID, r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved,
+		r.TenantID, r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved, r.UsesAI,
 	).Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
 }
 
 func (db *DB) GetRule(ctx context.Context, tenantID, id int64) (*models.Rule, error) {
 	r := &models.Rule{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, uses_ai, created_at, updated_at
 		 FROM rules WHERE id = $1 AND tenant_id = $2`, id, tenantID,
-	).Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.UsesAI, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +340,7 @@ func (db *DB) GetRule(ctx context.Context, tenantID, id int64) (*models.Rule, er
 
 func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, uses_ai, created_at, updated_at
 		 FROM rules WHERE tenant_id = $1 ORDER BY priority, id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -350,7 +350,7 @@ func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, err
 	var rules []models.Rule
 	for rows.Next() {
 		var r models.Rule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.UsesAI, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)
@@ -360,7 +360,7 @@ func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, err
 
 func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, uses_ai, created_at, updated_at
 		 FROM rules WHERE tenant_id = $1 AND active = true AND approved = true ORDER BY priority, id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -370,7 +370,7 @@ func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rul
 	var rules []models.Rule
 	for rows.Next() {
 		var r models.Rule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.UsesAI, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)
@@ -380,9 +380,9 @@ func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rul
 
 func (db *DB) UpdateRule(ctx context.Context, r *models.Rule) error {
 	_, err := db.Pool.Exec(ctx,
-		`UPDATE rules SET name=$1, description=$2, lua_code=$3, priority=$4, active=$5, source=$6, approved=$7, updated_at=NOW()
-		 WHERE id=$8 AND tenant_id=$9`,
-		r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved, r.ID, r.TenantID)
+		`UPDATE rules SET name=$1, description=$2, lua_code=$3, priority=$4, active=$5, source=$6, approved=$7, uses_ai=$8, updated_at=NOW()
+		 WHERE id=$9 AND tenant_id=$10`,
+		r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved, r.UsesAI, r.ID, r.TenantID)
 	return err
 }
 
@@ -565,7 +565,7 @@ func (db *DB) ApproveRule(ctx context.Context, tenantID, id int64) error {
 // ListSuggestedRules returns unapproved auto-learned rules for a tenant.
 func (db *DB) ListSuggestedRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, uses_ai, created_at, updated_at
 		 FROM rules WHERE tenant_id = $1 AND approved = false ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -575,7 +575,7 @@ func (db *DB) ListSuggestedRules(ctx context.Context, tenantID int64) ([]models.
 	var rules []models.Rule
 	for rows.Next() {
 		var r models.Rule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.UsesAI, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)

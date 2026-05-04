@@ -1,0 +1,1 @@
+ALTER TABLE rules DROP COLUMN IF EXISTS uses_ai;

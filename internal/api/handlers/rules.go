@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,9 @@ import (
 	"github.com/djpadz/email-automation/internal/imapactions"
 	"github.com/djpadz/email-automation/internal/models"
 )
+
+// kiroCallPattern matches any kiro.* function call in Lua code.
+var kiroCallPattern = regexp.MustCompile(`\bkiro\.\w+\s*\(`)
 
 // RuleHandlers holds dependencies for rule HTTP handlers.
 type RuleHandlers struct {
@@ -66,6 +70,11 @@ func (h *RuleHandlers) GetRule(c *fiber.Ctx) error {
 	return c.JSON(rule)
 }
 
+// detectUsesAI returns true if the Lua code contains any kiro.* function calls.
+func detectUsesAI(luaCode string) bool {
+	return kiroCallPattern.MatchString(luaCode)
+}
+
 // CreateRule creates a new rule.
 func (h *RuleHandlers) CreateRule(c *fiber.Ctx) error {
 	var rule models.Rule
@@ -80,6 +89,9 @@ func (h *RuleHandlers) CreateRule(c *fiber.Ctx) error {
 	if rule.Source == "manual" {
 		rule.Approved = true
 	}
+
+	// Auto-detect AI usage from Lua code
+	rule.UsesAI = detectUsesAI(rule.LuaCode)
 
 	// Validate Lua syntax
 	if err := h.Engine.ValidateLua(rule.LuaCode); err != nil {
@@ -110,6 +122,9 @@ func (h *RuleHandlers) UpdateRule(c *fiber.Ctx) error {
 
 	rule.ID = id
 	rule.TenantID = h.tenantID(c)
+
+	// Auto-detect AI usage from Lua code
+	rule.UsesAI = detectUsesAI(rule.LuaCode)
 
 	// Validate Lua syntax
 	if err := h.Engine.ValidateLua(rule.LuaCode); err != nil {
