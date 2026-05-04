@@ -69,21 +69,29 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const luaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastEditSource, setLastEditSource] = useState<'nl' | 'lua' | null>(null);
 
+  // Track last successfully submitted description to avoid redundant submissions
+  const lastSubmittedDescriptionRef = useRef<string>('');
+
   // Error banner state for non-Lua AI responses
   const [errorBanner, setErrorBanner] = useState<{ error: string; message: string } | null>(null);
 
-  // Translate natural language → Lua (debounced)
+  // Translate natural language → Lua (debounced, auto-submit with dedup)
   const translateNlToLua = useCallback((text: string) => {
     if (nlDebounceRef.current) clearTimeout(nlDebounceRef.current);
     if (!text.trim()) return;
 
     nlDebounceRef.current = setTimeout(async () => {
+      // Skip if this exact description was already submitted successfully
+      if (text.trim() === lastSubmittedDescriptionRef.current) return;
+
       try {
         setTranslating('nl2lua');
         setTranslationError('');
         setErrorBanner(null);
         const code = await naturalLanguageToLua(text);
         setLuaCode(code);
+        // Track successful submission
+        lastSubmittedDescriptionRef.current = text.trim();
       } catch (err) {
         if (err instanceof KiroTranslationError) {
           // Show error banner, don't update the Lua code
@@ -94,7 +102,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
       } finally {
         setTranslating(null);
       }
-    }, 500);
+    }, 1000);
   }, []);
 
   // Translate Lua → natural language (debounced)
