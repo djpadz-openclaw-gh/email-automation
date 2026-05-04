@@ -84,9 +84,21 @@ func (e *Engine) EvaluateWithOptions(rule *models.Rule, email *models.EmailConte
 	// Register kiro namespace for semantic evaluation
 	registerKiroNamespace(L, kiroClient, email)
 
-	// Execute the rule
-	if err := L.DoString(rule.LuaCode); err != nil {
-		return nil, fmt.Errorf("lua execution error: %w", err)
+	// Execute the rule with a timeout to prevent infinite loops
+	// Create a channel to signal completion
+	done := make(chan error, 1)
+	go func() {
+		done <- L.DoString(rule.LuaCode)
+	}()
+
+	// Wait for execution or timeout (5 second timeout per rule)
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, fmt.Errorf("lua execution error: %w", err)
+		}
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("lua execution timeout: rule took longer than 5 seconds")
 	}
 
 	// Extract result
