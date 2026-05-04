@@ -181,6 +181,11 @@ type Worker struct {
 	stopCh       chan struct{}
 	client       *imapclient.Client
 	clientMu     sync.Mutex
+
+	// IDLE-based move detection
+	expungeCh chan uint32    // receives sequence numbers from EXPUNGE notifications
+	inboxUIDs []imap.UID    // current INBOX UIDs ordered by sequence number
+	uidsMu    sync.Mutex    // protects inboxUIDs
 }
 
 // NewWorker creates a new IMAP worker for an account.
@@ -194,10 +199,11 @@ func NewWorker(account models.Account, database *db.DB, eng *engine.Engine, bus 
 		idleTimeout:  idleTimeout,
 		pollInterval: pollInterval,
 		stopCh:       make(chan struct{}),
+		expungeCh:    make(chan uint32, 64),
 	}
 }
 
-// Run starts the worker's main loop.
+// Run starts the worker's main loop with IDLE-based monitoring.
 func (w *Worker) Run(ctx context.Context) {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
@@ -222,14 +228,25 @@ func (w *Worker) Run(ctx context.Context) {
 		if err := w.poll(ctx); err != nil {
 			logger.Error().Err(err).Msg("poll cycle failed")
 			w.disconnect()
+			// Back off before retrying
+			select {
+			case <-ctx.Done():
+				return
+			case <-w.stopCh:
+				return
+			case <-time.After(w.pollInterval):
+			}
+			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-w.stopCh:
-			return
-		case <-time.After(w.pollInterval):
+		// Enter IDLE mode to wait for server notifications
+		expungedUIDs := w.idle(ctx)
+
+		// Process any messages that were expunged during IDLE
+		if len(expungedUIDs) > 0 {
+			if err := w.handleExpungedMessages(ctx, expungedUIDs); err != nil {
+				logger.Warn().Err(err).Msg("failed to handle expunged messages")
+			}
 		}
 	}
 }
@@ -240,6 +257,7 @@ func (w *Worker) Stop() {
 }
 
 // connect establishes an IMAP connection and logs in.
+// It sets up the UnilateralDataHandler to capture EXPUNGE notifications for move detection.
 func (w *Worker) connect() (*imapclient.Client, error) {
 	w.clientMu.Lock()
 	defer w.clientMu.Unlock()
@@ -268,6 +286,23 @@ func (w *Worker) connect() (*imapclient.Client, error) {
 	opts := &imapclient.Options{
 		TLSConfig: &tls.Config{
 			ServerName: host,
+		},
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Expunge: func(seqNum uint32) {
+				logger.Debug().Uint32("seq_num", seqNum).Msg("received EXPUNGE notification")
+				// Non-blocking send to avoid blocking the client
+				select {
+				case w.expungeCh <- seqNum:
+				default:
+					logger.Warn().Uint32("seq_num", seqNum).Msg("expunge channel full, dropping notification")
+				}
+			},
+			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
+				// Log mailbox status changes (EXISTS, etc.) for debugging
+				if data.NumMessages != nil {
+					logger.Debug().Uint32("num_messages", *data.NumMessages).Msg("mailbox EXISTS update")
+				}
+			},
 		},
 	}
 
@@ -318,7 +353,8 @@ func (w *Worker) disconnect() {
 	}
 }
 
-// poll checks for new messages and processes them through the rule engine.
+// poll checks for new messages, processes them through the rule engine,
+// and records message locations for IDLE-based move detection.
 func (w *Worker) poll(ctx context.Context) error {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
@@ -342,11 +378,46 @@ func (w *Worker) poll(ctx context.Context) error {
 	logger.Debug().Uint32("messages", mbox.NumMessages).Msg("INBOX selected")
 
 	if mbox.NumMessages == 0 {
+		// Clear the UID tracking since INBOX is empty
+		w.uidsMu.Lock()
+		w.inboxUIDs = nil
+		w.uidsMu.Unlock()
 		if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
 			logger.Warn().Err(err).Msg("failed to update sync time")
 		}
 		return nil
 	}
+
+	// Get ALL messages in INBOX for UID tracking (needed for IDLE move detection)
+	allCriteria := &imap.SearchCriteria{}
+	allSearchCmd := client.UIDSearch(allCriteria, nil)
+	allSearchData, err := allSearchCmd.Wait()
+	if err != nil {
+		return fmt.Errorf("search all messages: %w", err)
+	}
+	allUIDs := allSearchData.AllUIDs()
+
+	// Record message locations for all INBOX messages (needed for move detection lookups)
+	w.recordMessageLocations(ctx, client, allUIDs)
+
+	// Update the UID sequence list for IDLE expunge tracking
+	// UIDs from SEARCH are returned in ascending order which matches sequence number order
+	w.uidsMu.Lock()
+	w.inboxUIDs = make([]imap.UID, len(allUIDs))
+	copy(w.inboxUIDs, allUIDs)
+	w.uidsMu.Unlock()
+
+	logger.Debug().Int("tracked_uids", len(allUIDs)).Msg("updated INBOX UID tracking for IDLE")
+
+	// Drain any stale expunge notifications from before this poll
+	for {
+		select {
+		case <-w.expungeCh:
+		default:
+			goto drained
+		}
+	}
+drained:
 
 	// Search for UNSEEN messages
 	criteria := &imap.SearchCriteria{
@@ -359,22 +430,6 @@ func (w *Worker) poll(ctx context.Context) error {
 	}
 
 	uids := searchData.AllUIDs()
-
-	// Get ALL messages in INBOX (not just unseen) for move detection
-	allCriteria := &imap.SearchCriteria{}
-	allSearchCmd := client.UIDSearch(allCriteria, nil)
-	allSearchData, err := allSearchCmd.Wait()
-	if err != nil {
-		logger.Warn().Err(err).Msg("failed to search all messages for move detection")
-	} else {
-		allUIDs := allSearchData.AllUIDs()
-		// Detect moves in background to avoid blocking message processing
-		go func() {
-			if err := w.detectAndLearnFromMoves(ctx, client, allUIDs); err != nil {
-				logger.Warn().Err(err).Msg("move detection failed")
-			}
-		}()
-	}
 
 	if len(uids) == 0 {
 		logger.Debug().Msg("no unseen messages")
@@ -402,6 +457,315 @@ func (w *Worker) poll(ctx context.Context) error {
 
 	if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
 		logger.Warn().Err(err).Msg("failed to update sync time")
+	}
+
+	return nil
+}
+
+// recordMessageLocations fetches envelope data for all INBOX UIDs and records their locations.
+func (w *Worker) recordMessageLocations(ctx context.Context, client *imapclient.Client, uids []imap.UID) {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Logger()
+
+	if len(uids) == 0 {
+		return
+	}
+
+	// Fetch in batches to avoid overwhelming the server
+	batchSize := 100
+	for i := 0; i < len(uids); i += batchSize {
+		end := i + batchSize
+		if end > len(uids) {
+			end = len(uids)
+		}
+		batch := uids[i:end]
+
+		uidSet := imap.UIDSet{}
+		for _, uid := range batch {
+			uidSet.AddNum(uid)
+		}
+
+		fetchOptions := &imap.FetchOptions{
+			Envelope: true,
+			UID:      true,
+		}
+
+		fetchCmd := client.Fetch(uidSet, fetchOptions)
+		for {
+			msg := fetchCmd.Next()
+			if msg == nil {
+				break
+			}
+			buf, err := msg.Collect()
+			if err != nil {
+				logger.Warn().Err(err).Msg("failed to collect message for location tracking")
+				continue
+			}
+			if buf.Envelope == nil {
+				continue
+			}
+
+			var senderAddr string
+			if len(buf.Envelope.From) > 0 {
+				senderAddr = buf.Envelope.From[0].Addr()
+			}
+
+			loc := &models.MessageLocation{
+				AccountID:  w.account.ID,
+				MessageUID: fmt.Sprintf("%d", buf.UID),
+				Folder:     "INBOX",
+				MessageID:  buf.Envelope.MessageID,
+				Sender:     senderAddr,
+				Subject:    buf.Envelope.Subject,
+			}
+			if err := w.db.UpsertMessageLocation(ctx, loc); err != nil {
+				logger.Warn().Err(err).Str("message_id", buf.Envelope.MessageID).Msg("failed to record message location")
+			}
+		}
+		fetchCmd.Close()
+	}
+}
+
+// idle enters IMAP IDLE mode and waits for EXPUNGE notifications or timeout.
+// Returns a list of UIDs that were expunged during the IDLE session.
+func (w *Worker) idle(ctx context.Context) []imap.UID {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Str("email", w.account.Email).
+		Logger()
+
+	w.clientMu.Lock()
+	client := w.client
+	w.clientMu.Unlock()
+
+	if client == nil {
+		logger.Warn().Msg("no client available for IDLE")
+		return nil
+	}
+
+	// Start IDLE command
+	idleCmd, err := client.Idle()
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to start IDLE")
+		w.disconnect()
+		return nil
+	}
+
+	logger.Debug().Dur("timeout", w.idleTimeout).Msg("entering IDLE mode")
+
+	// Wait for expunge notifications, timeout, or stop signal
+	var expungedSeqNums []uint32
+	timer := time.NewTimer(w.idleTimeout)
+	defer timer.Stop()
+
+idle_loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break idle_loop
+		case <-w.stopCh:
+			break idle_loop
+		case seqNum := <-w.expungeCh:
+			logger.Info().Uint32("seq_num", seqNum).Msg("EXPUNGE received during IDLE")
+			expungedSeqNums = append(expungedSeqNums, seqNum)
+			// Give a short window to collect multiple rapid expunges
+			// (e.g., user moves several messages at once)
+			timer.Reset(2 * time.Second)
+		case <-timer.C:
+			break idle_loop
+		}
+	}
+
+	// Close IDLE to resume normal command mode
+	if err := idleCmd.Close(); err != nil {
+		logger.Error().Err(err).Msg("failed to close IDLE")
+		w.disconnect()
+		return nil
+	}
+
+	logger.Debug().Int("expunge_count", len(expungedSeqNums)).Msg("IDLE ended")
+
+	if len(expungedSeqNums) == 0 {
+		return nil
+	}
+
+	// Map sequence numbers to UIDs
+	// EXPUNGE notifications are processed in order: when seqNum N is expunged,
+	// all subsequent sequence numbers shift down by 1.
+	w.uidsMu.Lock()
+	expungedUIDs := w.mapSeqNumsToUIDs(expungedSeqNums)
+	w.uidsMu.Unlock()
+
+	return expungedUIDs
+}
+
+// mapSeqNumsToUIDs converts a series of EXPUNGE sequence numbers to UIDs.
+// Must be called with uidsMu held.
+// IMAP EXPUNGE notifications are sequential: after each expunge, remaining
+// sequence numbers shift down. We process them in order against our local copy.
+func (w *Worker) mapSeqNumsToUIDs(seqNums []uint32) []imap.UID {
+	var result []imap.UID
+
+	// Work on a copy so we can mutate it
+	uidsCopy := make([]imap.UID, len(w.inboxUIDs))
+	copy(uidsCopy, w.inboxUIDs)
+
+	for _, seqNum := range seqNums {
+		idx := int(seqNum) - 1 // sequence numbers are 1-based
+		if idx < 0 || idx >= len(uidsCopy) {
+			log.Warn().
+				Uint32("seq_num", seqNum).
+				Int("uid_count", len(uidsCopy)).
+				Msg("EXPUNGE sequence number out of range")
+			continue
+		}
+
+		result = append(result, uidsCopy[idx])
+		// Remove the expunged entry - subsequent seqNums reference the shifted list
+		uidsCopy = append(uidsCopy[:idx], uidsCopy[idx+1:]...)
+	}
+
+	// Update the worker's UID list to reflect the expunges
+	w.inboxUIDs = uidsCopy
+
+	return result
+}
+
+// handleExpungedMessages processes UIDs that were expunged from INBOX during IDLE.
+// For each expunged UID, it looks up the message details from message_locations
+// and searches other folders to detect where the message was moved.
+func (w *Worker) handleExpungedMessages(ctx context.Context, expungedUIDs []imap.UID) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Logger()
+
+	logger.Info().Int("count", len(expungedUIDs)).Msg("processing expunged messages for move detection")
+
+	client, err := w.connect()
+	if err != nil {
+		return fmt.Errorf("connect for move detection: %w", err)
+	}
+
+	for _, uid := range expungedUIDs {
+		uidStr := fmt.Sprintf("%d", uid)
+
+		// Look up the message details from our recorded locations
+		locs, err := w.db.GetMessageLocations(ctx, w.account.ID, uidStr)
+		if err != nil {
+			logger.Warn().Err(err).Str("uid", uidStr).Msg("failed to get message location")
+			continue
+		}
+
+		if len(locs) == 0 {
+			logger.Debug().Str("uid", uidStr).Msg("no recorded location for expunged UID, skipping")
+			continue
+		}
+
+		// Use the first (and typically only) location record
+		loc := locs[0]
+		if loc.MessageID == "" {
+			logger.Debug().Str("uid", uidStr).Msg("no Message-ID for expunged message, skipping")
+			continue
+		}
+
+		logger.Info().
+			Str("uid", uidStr).
+			Str("message_id", loc.MessageID).
+			Str("sender", loc.Sender).
+			Str("subject", loc.Subject).
+			Msg("looking for moved message in other folders")
+
+		// Search other folders for this message by Message-ID
+		if err := w.findMovedMessageAndLearn(ctx, client, loc); err != nil {
+			logger.Warn().Err(err).
+				Str("message_id", loc.MessageID).
+				Msg("failed to find moved message")
+		}
+	}
+
+	return nil
+}
+
+// findMovedMessageAndLearn searches other folders for a message by Message-ID
+// and creates an auto-learned rule if found.
+func (w *Worker) findMovedMessageAndLearn(ctx context.Context, client *imapclient.Client, loc models.MessageLocation) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Str("message_id", loc.MessageID).
+		Logger()
+
+	// List all folders
+	listCmd := client.List("", "%", nil)
+	mailboxes, err := listCmd.Collect()
+	if err != nil {
+		return fmt.Errorf("list mailboxes: %w", err)
+	}
+
+	// Search for the message in each folder (except INBOX)
+	for _, mbox := range mailboxes {
+		if mbox.Mailbox == "INBOX" {
+			continue
+		}
+
+		selectCmd := client.Select(mbox.Mailbox, nil)
+		if _, err := selectCmd.Wait(); err != nil {
+			continue // Skip folders we can't select
+		}
+
+		criteria := &imap.SearchCriteria{
+			Header: []imap.SearchCriteriaHeaderField{
+				{Key: "Message-ID", Value: loc.MessageID},
+			},
+		}
+		searchCmd := client.UIDSearch(criteria, nil)
+		searchData, err := searchCmd.Wait()
+		if err != nil {
+			continue
+		}
+
+		uids := searchData.AllUIDs()
+		if len(uids) > 0 {
+			// Found the message in this folder
+			logger.Info().Str("folder", mbox.Mailbox).Msg("found moved message via IDLE detection")
+
+			// Record the move
+			move := &models.DetectedMove{
+				AccountID:  w.account.ID,
+				MessageUID: fmt.Sprintf("%d", uids[0]),
+				MessageID:  loc.MessageID,
+				Sender:     loc.Sender,
+				Subject:    loc.Subject,
+				FromFolder: "INBOX",
+				ToFolder:   mbox.Mailbox,
+			}
+			if err := w.db.RecordDetectedMove(ctx, move); err != nil {
+				logger.Warn().Err(err).Msg("failed to record detected move")
+				return nil
+			}
+
+			// Generate and create a rule based on heuristics
+			if err := w.generateAndCreateRuleFromMove(ctx, loc.Sender, loc.Subject, mbox.Mailbox); err != nil {
+				logger.Warn().Err(err).Msg("failed to generate rule from move")
+			}
+
+			// Re-select INBOX for subsequent operations
+			reselectCmd := client.Select("INBOX", nil)
+			if _, err := reselectCmd.Wait(); err != nil {
+				logger.Warn().Err(err).Msg("failed to re-select INBOX after move detection")
+			}
+
+			return nil
+		}
+	}
+
+	// Message not found in any folder - might have been deleted
+	logger.Debug().Msg("expunged message not found in other folders (likely deleted)")
+
+	// Re-select INBOX for subsequent operations
+	reselectCmd := client.Select("INBOX", nil)
+	if _, err := reselectCmd.Wait(); err != nil {
+		logger.Warn().Err(err).Msg("failed to re-select INBOX after move search")
 	}
 
 	return nil
@@ -1077,156 +1441,7 @@ func (w *Worker) ExecuteDeferredAction(ctx context.Context, event *natsbus.Defer
 	return nil
 }
 
-// detectAndLearnFromMoves checks for messages that were moved out of INBOX and learns rules from them.
-func (w *Worker) detectAndLearnFromMoves(ctx context.Context, client *imapclient.Client, currentInboxUIDs []imap.UID) error {
-	logger := log.With().
-		Int64("account_id", w.account.ID).
-		Logger()
 
-	// Get all messages currently in INBOX with their metadata
-	currentMessages := make(map[string]*models.EmailContext) // messageID -> EmailContext
-	for _, uid := range currentInboxUIDs {
-		uidSet := imap.UIDSetNum(uid)
-		fetchOptions := &imap.FetchOptions{
-			Envelope: true,
-			UID:      true,
-		}
-		fetchCmd := client.Fetch(uidSet, fetchOptions)
-		for {
-			msg := fetchCmd.Next()
-			if msg == nil {
-				break
-			}
-			buf, err := msg.Collect()
-			if err != nil {
-				continue
-			}
-			email := w.bufferToEmailContext(buf)
-			if email != nil {
-				currentMessages[email.MessageID] = email
-				// Record this message as being in INBOX
-				loc := &models.MessageLocation{
-					AccountID:  w.account.ID,
-					MessageUID: fmt.Sprintf("%d", buf.UID),
-					Folder:     "INBOX",
-					MessageID:  email.MessageID,
-					Sender:     email.SenderAddress,
-					Subject:    email.Subject,
-				}
-				if err := w.db.UpsertMessageLocation(ctx, loc); err != nil {
-					logger.Warn().Err(err).Str("message_id", email.MessageID).Msg("failed to record message location")
-				}
-			}
-		}
-		fetchCmd.Close()
-	}
-
-	// Get all known message locations for this account
-	rows, err := w.db.Pool.Query(ctx,
-		`SELECT DISTINCT message_id, sender, subject FROM message_locations WHERE account_id = $1 AND folder = 'INBOX' AND seen_at > NOW() - INTERVAL '7 days'`,
-		w.account.ID)
-	if err != nil {
-		return fmt.Errorf("query previous inbox messages: %w", err)
-	}
-	defer rows.Close()
-
-	var previousMessages []struct {
-		MessageID string
-		Sender    string
-		Subject   string
-	}
-	for rows.Next() {
-		var m struct {
-			MessageID string
-			Sender    string
-			Subject   string
-		}
-		if err := rows.Scan(&m.MessageID, &m.Sender, &m.Subject); err != nil {
-			continue
-		}
-		previousMessages = append(previousMessages, m)
-	}
-
-	// Find messages that were in INBOX but are no longer there
-	for _, prev := range previousMessages {
-		if _, exists := currentMessages[prev.MessageID]; !exists {
-			// Message was moved out of INBOX - find where it went
-			if err := w.findAndLearnFromMove(ctx, client, prev.MessageID, prev.Sender, prev.Subject); err != nil {
-				logger.Warn().Err(err).Str("message_id", prev.MessageID).Msg("failed to find and learn from move")
-			}
-		}
-	}
-
-	return nil
-}
-
-// findAndLearnFromMove searches for a message in other folders and learns a rule if found.
-func (w *Worker) findAndLearnFromMove(ctx context.Context, client *imapclient.Client, messageID, sender, subject string) error {
-	logger := log.With().
-		Int64("account_id", w.account.ID).
-		Str("message_id", messageID).
-		Logger()
-
-	// List all folders
-	listCmd := client.List("", "%", nil)
-	mailboxes, err := listCmd.Collect()
-	if err != nil {
-		return fmt.Errorf("list mailboxes: %w", err)
-	}
-
-	// Search for the message in each folder
-	for _, mbox := range mailboxes {
-		if mbox.Mailbox == "INBOX" {
-			continue // Skip INBOX since we already know it's not there
-		}
-
-		selectCmd := client.Select(mbox.Mailbox, nil)
-		if _, err := selectCmd.Wait(); err != nil {
-			continue // Skip folders we can't select
-		}
-
-		criteria := &imap.SearchCriteria{
-			Header: []imap.SearchCriteriaHeaderField{
-				{Key: "Message-ID", Value: messageID},
-			},
-		}
-		searchCmd := client.UIDSearch(criteria, nil)
-		searchData, err := searchCmd.Wait()
-		if err != nil {
-			continue
-		}
-
-		uids := searchData.AllUIDs()
-		if len(uids) > 0 {
-			// Found the message in this folder
-			logger.Info().Str("folder", mbox.Mailbox).Msg("found moved message")
-
-			// Record the move
-			move := &models.DetectedMove{
-				AccountID:  w.account.ID,
-				MessageUID: fmt.Sprintf("%d", uids[0]),
-				MessageID:  messageID,
-				Sender:     sender,
-				Subject:    subject,
-				FromFolder: "INBOX",
-				ToFolder:   mbox.Mailbox,
-			}
-			if err := w.db.RecordDetectedMove(ctx, move); err != nil {
-				logger.Warn().Err(err).Msg("failed to record detected move")
-				return nil
-			}
-
-			// Generate and create a rule based on heuristics
-			if err := w.generateAndCreateRuleFromMove(ctx, sender, subject, mbox.Mailbox); err != nil {
-				logger.Warn().Err(err).Msg("failed to generate rule from move")
-			}
-
-			return nil
-		}
-	}
-
-	return nil
-}
 
 // generateAndCreateRuleFromMove creates a rule based on the move heuristics.
 func (w *Worker) generateAndCreateRuleFromMove(ctx context.Context, sender, subject, targetFolder string) error {
