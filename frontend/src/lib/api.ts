@@ -9,6 +9,8 @@ export interface Rule {
   lua_code: string;
   priority: number;
   active: boolean;
+  source: string;    // 'manual' or 'auto-learned'
+  approved: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +50,49 @@ export interface ExecutionLog {
   success: boolean;
   error: string;
   executed_at: string;
+}
+
+export interface DryRunMatch {
+  message_id: string;
+  subject: string;
+  sender_address: string;
+  action: string;
+  target: string;
+  reason: string;
+}
+
+export interface DryRunResult {
+  total_scanned: number;
+  total_matched: number;
+  matches: DryRunMatch[];
+  cancelled?: boolean;
+}
+
+export interface ExecuteResult {
+  total_scanned: number;
+  total_executed: number;
+  total_failed: number;
+  results: DryRunMatch[];
+  errors?: string[];
+  cancelled?: boolean;
+}
+
+export interface DeferredAction {
+  id: number;
+  rule_id: number;
+  account_id: number;
+  message_id: string;
+  action: string;
+  target: string;
+  execute_at: string;
+  executed: boolean;
+  error: string;
+  created_at: string;
+  rule_name: string;
+}
+
+export interface DeferredActionsResponse {
+  deferred_actions: DeferredAction[];
 }
 
 export interface EmailContext {
@@ -330,6 +375,10 @@ class ApiClient {
     return this.request<Rule[]>('/api/v1/rules');
   }
 
+  async listSuggestedRules(): Promise<Rule[]> {
+    return this.request<Rule[]>('/api/v1/rules/suggested');
+  }
+
   async getRule(id: number): Promise<Rule> {
     return this.request<Rule>(`/api/v1/rules/${id}`);
   }
@@ -350,6 +399,10 @@ class ApiClient {
 
   async deleteRule(id: number): Promise<void> {
     await this.request(`/api/v1/rules/${id}`, { method: 'DELETE' });
+  }
+
+  async approveRule(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/rules/${id}/approve`, { method: 'POST' });
   }
 
   async testRule(luaCode: string, email: EmailContext): Promise<RuleResult> {
@@ -392,6 +445,50 @@ class ApiClient {
   // --- Logs ---
   async listLogs(limit: number = 50): Promise<ExecutionLog[]> {
     return this.request<ExecutionLog[]>(`/api/v1/logs?limit=${limit}`);
+  }
+
+  // --- Dry Run & Execute ---
+  async dryRunRule(id: number, luaCode?: string, limit?: number, signal?: AbortSignal): Promise<DryRunResult> {
+    const body: Record<string, unknown> = {};
+    if (luaCode) body.lua_code = luaCode;
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<DryRunResult>(`/api/v1/rules/${id}/dry-run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async executeRule(id: number, luaCode?: string, limit?: number, signal?: AbortSignal): Promise<ExecuteResult> {
+    const body: Record<string, unknown> = {};
+    if (luaCode) body.lua_code = luaCode;
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<ExecuteResult>(`/api/v1/rules/${id}/execute`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async cancelRuleOperation(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/rules/${id}/cancel`, { method: 'POST' });
+  }
+
+  // --- Deferred Actions ---
+  async listDeferredActions(): Promise<DeferredActionsResponse> {
+    return this.request<DeferredActionsResponse>('/api/v1/deferred-actions');
+  }
+
+  async cancelDeferredAction(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/deferred-actions/${id}`, { method: 'DELETE' });
+  }
+
+  // --- Reorder ---
+  async reorderRules(ruleIds: number[]): Promise<{ message: string }> {
+    return this.request('/api/v1/rules/reorder', {
+      method: 'PATCH',
+      body: JSON.stringify({ rule_ids: ruleIds }),
+    });
   }
 }
 

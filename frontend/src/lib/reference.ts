@@ -19,9 +19,9 @@ if not older_than_hours(2) then return skip() end
 
 local subject = email.subject:lower()
 
-if subject:find("verification code", 1, true) or
-   subject:find("login code", 1, true) or
-   subject:find("one-time password", 1, true) then
+if subject:match("verification code") or
+   subject:match("login code") or
+   subject:match("one%-time password") then
     return delete("Expired verification code")
 end
 
@@ -34,23 +34,14 @@ return skip()`,
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-local billing_domains = { "stripe.com", "paypal.com", "square.com" }
-local billing_keywords = { "receipt", "invoice", "payment", "billing" }
-
-local domain_match = false
-for _, domain in ipairs(billing_domains) do
-    if sender:find(domain, 1, true) then
-        domain_match = true
-        break
-    end
+if not (sender:match("stripe%.com") or
+        sender:match("paypal%.com") or
+        sender:match("square%.com")) then
+    return skip()
 end
 
-if not domain_match then return skip() end
-
-for _, kw in ipairs(billing_keywords) do
-    if subject:find(kw, 1, true) then
-        return move("@Receipts", "Billing email from " .. sender)
-    end
+if contains_any(subject, { "receipt", "invoice", "payment", "billing" }) then
+    return move("@Receipts", "Billing email from " .. sender)
 end
 
 return skip()`,
@@ -60,22 +51,15 @@ return skip()`,
     description: 'Archive old calendar responses with .ics attachments',
     code: `-- Archive calendar responses older than 24h that have .ics attachments
 if not older_than_hours(24) then return skip() end
-
-local subject = email.subject
-local prefixes = { "Accepted:", "Declined:", "Tentative:" }
-
-local is_response = false
-for _, prefix in ipairs(prefixes) do
-    if subject:sub(1, #prefix) == prefix then
-        is_response = true
-        break
-    end
-end
-
-if not is_response then return skip() end
 if not has_ics() then return skip() end
 
-return archive("Old calendar response")`,
+if starts_with(email.subject, "Accepted:") or
+   starts_with(email.subject, "Declined:") or
+   starts_with(email.subject, "Tentative:") then
+    return archive("Old calendar response")
+end
+
+return skip()`,
   },
   {
     name: 'Notification with template',
@@ -85,7 +69,7 @@ local sender = email.sender_address:lower()
 
 if sender == "ceo@company.com" then
     return notify(
-        "🔔 Email from CEO: " .. email.subject,
+        "\xF0\x9F\x94\x94 Email from CEO: " .. email.subject,
         "Priority sender notification"
     )
 end
@@ -125,6 +109,7 @@ export const REFERENCE_DOCS = {
       { name: 'move(folder, reason?)', description: 'Move to a specific IMAP folder' },
       { name: 'keep(reason?)', description: 'Explicitly keep in inbox, stop rule chain' },
       { name: 'notify(message, reason?)', description: 'Send a Telegram notification' },
+      { name: 'flag(flag_name, reason?)', description: 'Set an IMAP flag (Junk, Flagged, Seen, Answered, Draft, Deleted)' },
       { name: 'defer_action(action, target, delay_secs, reason?)', description: 'Schedule an action for later' },
       { name: 'move_after(folder, delay_secs, reason?)', description: 'Move to folder after delay' },
       { name: 'delete_after(delay_secs, reason?)', description: 'Delete after delay' },

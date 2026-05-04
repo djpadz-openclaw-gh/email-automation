@@ -8,6 +8,7 @@ export default function AccountList() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
 
   // Form state
   const [formName, setFormName] = useState('');
@@ -36,7 +37,7 @@ export default function AccountList() {
     loadAccounts();
   }, []);
 
-  const handleCreate = async () => {
+  const handleSave = async () => {
     if (!formName.trim() || !formEmail.trim() || !formHost.trim()) {
       setError('Name, email, and IMAP host are required');
       return;
@@ -45,7 +46,8 @@ export default function AccountList() {
     try {
       setFormSaving(true);
       setError('');
-      await api.createAccount({
+
+      const data: Partial<Account> & { password?: string } = {
         name: formName.trim(),
         email: formEmail.trim(),
         provider: 'imap',
@@ -53,16 +55,42 @@ export default function AccountList() {
         imap_port: formPort,
         imap_tls: formTLS,
         username: formUsername.trim() || formEmail.trim(),
-        active: true,
-      });
+        active: editingAccount?.active ?? true,
+      };
+
+      // Only include password if it was entered (for edits, empty means "don't change")
+      if (formPassword) {
+        (data as Record<string, unknown>).password = formPassword;
+      }
+
+      if (editingAccount) {
+        await api.updateAccount(editingAccount.id, data);
+      } else {
+        await api.createAccount(data);
+      }
+
       setShowForm(false);
+      setEditingAccount(null);
       resetForm();
       await loadAccounts();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create account');
+      setError(err instanceof Error ? err.message : `Failed to ${editingAccount ? 'update' : 'create'} account`);
     } finally {
       setFormSaving(false);
     }
+  };
+
+  const handleEdit = (account: Account) => {
+    setEditingAccount(account);
+    setFormName(account.name);
+    setFormEmail(account.email);
+    setFormHost(account.imap_host);
+    setFormPort(account.imap_port);
+    setFormTLS(account.imap_tls);
+    setFormUsername(account.username || '');
+    setFormPassword('');
+    setShowForm(true);
+    setError('');
   };
 
   const handleDelete = async (account: Account) => {
@@ -92,6 +120,7 @@ export default function AccountList() {
     setFormTLS(true);
     setFormUsername('');
     setFormPassword('');
+    setEditingAccount(null);
   };
 
   if (loading) {
@@ -109,10 +138,10 @@ export default function AccountList() {
           Accounts ({accounts.length})
         </h2>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={() => { setShowForm(!showForm); if (showForm) resetForm(); }}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
         >
-          + Add Account
+          {showForm ? 'Cancel' : '+ Add Account'}
         </button>
       </div>
 
@@ -125,7 +154,9 @@ export default function AccountList() {
       {/* Add account form */}
       {showForm && (
         <div className="mb-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">New IMAP Account</h3>
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
+            {editingAccount ? `Edit: ${editingAccount.name}` : 'New IMAP Account'}
+          </h3>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label htmlFor="acc-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
@@ -156,13 +187,15 @@ export default function AccountList() {
               <input id="acc-user" type="text" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} placeholder="Defaults to email" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
             </div>
             <div>
-              <label htmlFor="acc-pass" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
-              <input id="acc-pass" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+              <label htmlFor="acc-pass" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Password{editingAccount && <span className="text-gray-400 font-normal"> (leave blank to keep current)</span>}
+              </label>
+              <input id="acc-pass" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} placeholder={editingAccount ? '••••••••' : ''} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
             </div>
           </div>
           <div className="flex gap-3 mt-4">
-            <button onClick={handleCreate} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
-              {formSaving ? 'Creating...' : 'Create Account'}
+            <button onClick={handleSave} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+              {formSaving ? (editingAccount ? 'Updating...' : 'Creating...') : (editingAccount ? 'Update Account' : 'Create Account')}
             </button>
             <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
               Cancel
@@ -203,6 +236,9 @@ export default function AccountList() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button onClick={() => handleEdit(account)} className="p-2 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors" title="Edit" aria-label="Edit account">
+                    ✏️
+                  </button>
                   <button onClick={() => handleToggle(account)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors" title={account.active ? 'Disable' : 'Enable'} aria-label={account.active ? 'Disable account' : 'Enable account'}>
                     {account.active ? '⏸' : '▶️'}
                   </button>

@@ -12,12 +12,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/djpadz/email-automation/internal/crypto"
 	"github.com/djpadz/email-automation/internal/models"
 )
 
 // DB wraps a pgx connection pool and provides data access methods.
 type DB struct {
-	Pool *pgxpool.Pool
+	Pool      *pgxpool.Pool
+	Encryptor *crypto.Encryptor // nil = no encryption
 }
 
 // New creates a new database connection pool.
@@ -43,6 +45,27 @@ func New(ctx context.Context, databaseURL string) (*DB, error) {
 	}
 
 	return &DB{Pool: pool}, nil
+}
+
+// SetEncryptor sets the password encryptor for account operations.
+func (db *DB) SetEncryptor(enc *crypto.Encryptor) {
+	db.Encryptor = enc
+}
+
+// encryptPassword encrypts a password if an encryptor is configured.
+func (db *DB) encryptPassword(password string, accountID int64) (string, error) {
+	if db.Encryptor == nil || password == "" {
+		return password, nil
+	}
+	return db.Encryptor.Encrypt(password, accountID)
+}
+
+// decryptPassword decrypts a password if an encryptor is configured.
+func (db *DB) decryptPassword(password string, accountID int64) (string, error) {
+	if db.Encryptor == nil || password == "" {
+		return password, nil
+	}
+	return db.Encryptor.Decrypt(password, accountID)
 }
 
 // Close shuts down the connection pool.
@@ -177,12 +200,33 @@ func (db *DB) ListTenants(ctx context.Context) ([]models.Tenant, error) {
 // --- Account operations ---
 
 func (db *DB) CreateAccount(ctx context.Context, a *models.Account) error {
-	return db.Pool.QueryRow(ctx,
+	// We need the ID for encryption, so insert first with empty password,
+	// then encrypt and update. Or use a two-step approach.
+	// Actually, we can insert with plaintext first, get the ID, then encrypt+update.
+	// Better: insert with placeholder, get ID, encrypt, update.
+	err := db.Pool.QueryRow(ctx,
 		`INSERT INTO accounts (tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING id, created_at, updated_at`,
 		a.TenantID, a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.Active,
 	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	// Now encrypt the password with the account ID and update
+	if db.Encryptor != nil && a.Password != "" {
+		encrypted, encErr := db.encryptPassword(a.Password, a.ID)
+		if encErr != nil {
+			return fmt.Errorf("encrypt password: %w", encErr)
+		}
+		_, err = db.Pool.Exec(ctx,
+			`UPDATE accounts SET password = $1 WHERE id = $2`, encrypted, a.ID)
+		if err != nil {
+			return fmt.Errorf("update encrypted password: %w", err)
+		}
+	}
+	return nil
 }
 
 func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Account, error) {
@@ -193,6 +237,10 @@ func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Accou
 	).Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	// Decrypt password
+	if decrypted, decErr := db.decryptPassword(a.Password, a.ID); decErr == nil {
+		a.Password = decrypted
 	}
 	return a, nil
 }
@@ -232,16 +280,25 @@ func (db *DB) ListActiveAccounts(ctx context.Context) ([]models.Account, error) 
 		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
+		// Decrypt password
+		if decrypted, decErr := db.decryptPassword(a.Password, a.ID); decErr == nil {
+			a.Password = decrypted
+		}
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
 }
 
 func (db *DB) UpdateAccount(ctx context.Context, a *models.Account) error {
+	// Encrypt password before storing
+	password := a.Password
+	if encrypted, err := db.encryptPassword(a.Password, a.ID); err == nil {
+		password = encrypted
+	}
 	_, err := db.Pool.Exec(ctx,
 		`UPDATE accounts SET name=$1, email=$2, provider=$3, imap_host=$4, imap_port=$5, imap_tls=$6, username=$7, password=$8, oauth_token=$9, active=$10, updated_at=NOW()
 		 WHERE id=$11 AND tenant_id=$12`,
-		a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.Active, a.ID, a.TenantID)
+		a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, password, a.OAuthToken, a.Active, a.ID, a.TenantID)
 	return err
 }
 
@@ -258,20 +315,23 @@ func (db *DB) UpdateAccountSyncTime(ctx context.Context, accountID int64) error 
 // --- Rule operations ---
 
 func (db *DB) CreateRule(ctx context.Context, r *models.Rule) error {
+	if r.Source == "" {
+		r.Source = "manual"
+	}
 	return db.Pool.QueryRow(ctx,
-		`INSERT INTO rules (tenant_id, name, description, lua_code, priority, active)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO rules (tenant_id, name, description, lua_code, priority, active, source, approved)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, created_at, updated_at`,
-		r.TenantID, r.Name, r.Description, r.LuaCode, r.Priority, r.Active,
+		r.TenantID, r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved,
 	).Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
 }
 
 func (db *DB) GetRule(ctx context.Context, tenantID, id int64) (*models.Rule, error) {
 	r := &models.Rule{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
 		 FROM rules WHERE id = $1 AND tenant_id = $2`, id, tenantID,
-	).Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +340,7 @@ func (db *DB) GetRule(ctx context.Context, tenantID, id int64) (*models.Rule, er
 
 func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
 		 FROM rules WHERE tenant_id = $1 ORDER BY priority, id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -290,7 +350,7 @@ func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, err
 	var rules []models.Rule
 	for rows.Next() {
 		var r models.Rule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)
@@ -300,8 +360,8 @@ func (db *DB) ListRules(ctx context.Context, tenantID int64) ([]models.Rule, err
 
 func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, description, lua_code, priority, active, created_at, updated_at
-		 FROM rules WHERE tenant_id = $1 AND active = true ORDER BY priority, id`, tenantID)
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		 FROM rules WHERE tenant_id = $1 AND active = true AND approved = true ORDER BY priority, id`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +370,7 @@ func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rul
 	var rules []models.Rule
 	for rows.Next() {
 		var r models.Rule
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		rules = append(rules, r)
@@ -320,9 +380,9 @@ func (db *DB) ListActiveRules(ctx context.Context, tenantID int64) ([]models.Rul
 
 func (db *DB) UpdateRule(ctx context.Context, r *models.Rule) error {
 	_, err := db.Pool.Exec(ctx,
-		`UPDATE rules SET name=$1, description=$2, lua_code=$3, priority=$4, active=$5, updated_at=NOW()
-		 WHERE id=$6 AND tenant_id=$7`,
-		r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.ID, r.TenantID)
+		`UPDATE rules SET name=$1, description=$2, lua_code=$3, priority=$4, active=$5, source=$6, approved=$7, updated_at=NOW()
+		 WHERE id=$8 AND tenant_id=$9`,
+		r.Name, r.Description, r.LuaCode, r.Priority, r.Active, r.Source, r.Approved, r.ID, r.TenantID)
 	return err
 }
 
@@ -404,6 +464,71 @@ func (db *DB) MarkDeferredActionDone(ctx context.Context, id int64, errMsg strin
 	return err
 }
 
+// ListDeferredActions returns all pending (not yet executed) deferred actions for a tenant.
+func (db *DB) ListDeferredActions(ctx context.Context, tenantID int64) ([]models.DeferredAction, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT d.id, d.rule_id, d.account_id, d.message_id, d.action, d.target, d.execute_at, d.executed, d.error, d.created_at
+		 FROM deferred_actions d
+		 JOIN accounts a ON a.id = d.account_id
+		 WHERE a.tenant_id = $1 AND d.executed = false
+		 ORDER BY d.execute_at ASC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var actions []models.DeferredAction
+	for rows.Next() {
+		var d models.DeferredAction
+		if err := rows.Scan(&d.ID, &d.RuleID, &d.AccountID, &d.MessageID, &d.Action, &d.Target, &d.ExecuteAt, &d.Executed, &d.Error, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		actions = append(actions, d)
+	}
+	return actions, rows.Err()
+}
+
+// CancelDeferredAction deletes a pending deferred action for a tenant.
+func (db *DB) CancelDeferredAction(ctx context.Context, tenantID int64, actionID int64) error {
+	tag, err := db.Pool.Exec(ctx,
+		`DELETE FROM deferred_actions d
+		 USING accounts a
+		 WHERE d.id = $1 AND d.account_id = a.id AND a.tenant_id = $2 AND d.executed = false`,
+		actionID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("deferred action not found or already executed")
+	}
+	return nil
+}
+
+// ReorderRules updates rule priorities based on the provided order of rule IDs.
+// The first ID gets priority 10, second gets 20, etc.
+func (db *DB) ReorderRules(ctx context.Context, tenantID int64, ruleIDs []int64) error {
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for i, id := range ruleIDs {
+		priority := (i + 1) * 10
+		tag, err := tx.Exec(ctx,
+			`UPDATE rules SET priority = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3`,
+			priority, id, tenantID)
+		if err != nil {
+			return fmt.Errorf("update rule %d: %w", id, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("rule %d not found for tenant", id)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
 // --- Processed message operations ---
 
 func (db *DB) IsMessageProcessed(ctx context.Context, accountID int64, messageUID string) (bool, error) {
@@ -425,4 +550,180 @@ func (db *DB) MarkMessageProcessed(ctx context.Context, accountID int64, message
 		 ON CONFLICT (account_id, message_uid) DO NOTHING`,
 		accountID, messageUID, ruleID, action)
 	return err
+}
+
+// --- Suggested/auto-learned rule operations ---
+
+// ApproveRule marks an auto-learned rule as approved so it becomes active.
+func (db *DB) ApproveRule(ctx context.Context, tenantID, id int64) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE rules SET approved = true, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+		id, tenantID)
+	return err
+}
+
+// ListSuggestedRules returns unapproved auto-learned rules for a tenant.
+func (db *DB) ListSuggestedRules(ctx context.Context, tenantID int64) ([]models.Rule, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, name, description, lua_code, priority, active, source, approved, created_at, updated_at
+		 FROM rules WHERE tenant_id = $1 AND approved = false ORDER BY created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []models.Rule
+	for rows.Next() {
+		var r models.Rule
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.Name, &r.Description, &r.LuaCode, &r.Priority, &r.Active, &r.Source, &r.Approved, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// --- Message location tracking ---
+
+// UpsertMessageLocation records or updates a message's known folder location.
+func (db *DB) UpsertMessageLocation(ctx context.Context, loc *models.MessageLocation) error {
+	_, err := db.Pool.Exec(ctx,
+		`INSERT INTO message_locations (account_id, message_uid, folder, message_id, sender, subject, seen_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		 ON CONFLICT (account_id, message_uid, folder) DO UPDATE SET seen_at = NOW()`,
+		loc.AccountID, loc.MessageUID, loc.Folder, loc.MessageID, loc.Sender, loc.Subject)
+	return err
+}
+
+// GetMessageLocations returns all known locations for a message.
+func (db *DB) GetMessageLocations(ctx context.Context, accountID int64, messageUID string) ([]models.MessageLocation, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT account_id, message_uid, folder, message_id, sender, subject, seen_at
+		 FROM message_locations WHERE account_id = $1 AND message_uid = $2 ORDER BY seen_at`,
+		accountID, messageUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var locs []models.MessageLocation
+	for rows.Next() {
+		var l models.MessageLocation
+		if err := rows.Scan(&l.AccountID, &l.MessageUID, &l.Folder, &l.MessageID, &l.Sender, &l.Subject, &l.SeenAt); err != nil {
+			return nil, err
+		}
+		locs = append(locs, l)
+	}
+	return locs, rows.Err()
+}
+
+// --- Detected move operations ---
+
+// RecordDetectedMove logs a detected message move between folders.
+func (db *DB) RecordDetectedMove(ctx context.Context, m *models.DetectedMove) error {
+	return db.Pool.QueryRow(ctx,
+		`INSERT INTO detected_moves (account_id, message_uid, message_id, sender, subject, from_folder, to_folder)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, detected_at`,
+		m.AccountID, m.MessageUID, m.MessageID, m.Sender, m.Subject, m.FromFolder, m.ToFolder,
+	).Scan(&m.ID, &m.DetectedAt)
+}
+
+// ListDetectedMoves returns recent detected moves for a tenant's accounts.
+func (db *DB) ListDetectedMoves(ctx context.Context, tenantID int64, limit int) ([]models.DetectedMove, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT d.id, d.account_id, d.message_uid, d.message_id, d.sender, d.subject, d.from_folder, d.to_folder, d.detected_at, d.rule_id
+		 FROM detected_moves d
+		 JOIN accounts a ON a.id = d.account_id
+		 WHERE a.tenant_id = $1
+		 ORDER BY d.detected_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var moves []models.DetectedMove
+	for rows.Next() {
+		var m models.DetectedMove
+		if err := rows.Scan(&m.ID, &m.AccountID, &m.MessageUID, &m.MessageID, &m.Sender, &m.Subject, &m.FromFolder, &m.ToFolder, &m.DetectedAt, &m.RuleID); err != nil {
+			return nil, err
+		}
+		moves = append(moves, m)
+	}
+	return moves, rows.Err()
+}
+
+// CleanOldMessageLocations removes message location records older than the given duration.
+func (db *DB) CleanOldMessageLocations(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	tag, err := db.Pool.Exec(ctx,
+		`DELETE FROM message_locations WHERE seen_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// RotateEncryptionKeys re-encrypts all account passwords with the current master key version.
+// Returns the number of passwords rotated.
+func (db *DB) RotateEncryptionKeys(ctx context.Context) (int, error) {
+	if db.Encryptor == nil {
+		return 0, fmt.Errorf("no encryptor configured")
+	}
+
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, password FROM accounts WHERE password != '' AND password IS NOT NULL`)
+	if err != nil {
+		return 0, fmt.Errorf("query accounts: %w", err)
+	}
+	defer rows.Close()
+
+	type accountPassword struct {
+		ID       int64
+		Password string
+	}
+
+	var toRotate []accountPassword
+	for rows.Next() {
+		var ap accountPassword
+		if err := rows.Scan(&ap.ID, &ap.Password); err != nil {
+			return 0, fmt.Errorf("scan account: %w", err)
+		}
+		if db.Encryptor.NeedsRotation(ap.Password) {
+			toRotate = append(toRotate, ap)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate accounts: %w", err)
+	}
+
+	rotated := 0
+	for _, ap := range toRotate {
+		// Decrypt with old key
+		plaintext, err := db.Encryptor.Decrypt(ap.Password, ap.ID)
+		if err != nil {
+			log.Error().Err(err).Int64("account_id", ap.ID).Msg("failed to decrypt password during rotation")
+			continue
+		}
+
+		// Re-encrypt with current key
+		encrypted, err := db.Encryptor.Encrypt(plaintext, ap.ID)
+		if err != nil {
+			log.Error().Err(err).Int64("account_id", ap.ID).Msg("failed to re-encrypt password during rotation")
+			continue
+		}
+
+		_, err = db.Pool.Exec(ctx,
+			`UPDATE accounts SET password = $1, updated_at = NOW() WHERE id = $2`,
+			encrypted, ap.ID)
+		if err != nil {
+			log.Error().Err(err).Int64("account_id", ap.ID).Msg("failed to update rotated password")
+			continue
+		}
+
+		rotated++
+		log.Info().Int64("account_id", ap.ID).Msg("rotated encryption key for account")
+	}
+
+	return rotated, nil
 }

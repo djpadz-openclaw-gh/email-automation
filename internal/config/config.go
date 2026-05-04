@@ -34,6 +34,9 @@ type Config struct {
 	// Rules
 	RulesDir string
 
+	// Migrations
+	MigrationsDir string
+
 	// Auth (legacy admin key)
 	APIKey string
 
@@ -52,6 +55,11 @@ type Config struct {
 	// Kiro API
 	KiroAPIKey string
 	KiroAPIURL string
+
+	// Encryption
+	EncryptionMasterKey        string
+	EncryptionMasterKeyVersion int
+	EncryptionPreviousKeys     map[int]string // version → key for rotation
 
 	// Rate limiting
 	RateLimitWindow   time.Duration
@@ -76,6 +84,7 @@ func Load() *Config {
 		TelegramBotToken:  envStr("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:    envStr("TELEGRAM_CHAT_ID", ""),
 		RulesDir:          envStr("RULES_DIR", "./rules"),
+		MigrationsDir:     envStr("MIGRATIONS_DIR", "./migrations"),
 		APIKey:            envStr("API_KEY", ""),
 		JWTSecret:         envStr("JWT_SECRET", ""),
 		JWTExpiration:     envDuration("JWT_EXPIRATION", 24*time.Hour),
@@ -85,6 +94,9 @@ func Load() *Config {
 		RateLimitMaxFails: envInt("RATE_LIMIT_MAX_FAILS", 10),
 		KiroAPIKey:          envStr("KIRO_API_KEY", ""),
 		KiroAPIURL:          envStr("KIRO_API_URL", "https://api.anthropic.com/v1/messages"),
+		EncryptionMasterKey:        envStr("ENCRYPTION_MASTER_KEY", ""),
+		EncryptionMasterKeyVersion: envInt("ENCRYPTION_MASTER_KEY_VERSION", 1),
+		EncryptionPreviousKeys:     parsePreviousKeys(),
 		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		LogJSON:           envBool("LOG_JSON", true),
@@ -149,4 +161,26 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// parsePreviousKeys reads ENCRYPTION_MASTER_KEY_V<N> environment variables
+// for key rotation support. E.g. ENCRYPTION_MASTER_KEY_V1=oldkey
+func parsePreviousKeys() map[int]string {
+	keys := make(map[int]string)
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "ENCRYPTION_MASTER_KEY_V") {
+			continue
+		}
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		versionStr := strings.TrimPrefix(parts[0], "ENCRYPTION_MASTER_KEY_V")
+		version, err := strconv.Atoi(versionStr)
+		if err != nil {
+			continue
+		}
+		keys[version] = parts[1]
+	}
+	return keys
 }

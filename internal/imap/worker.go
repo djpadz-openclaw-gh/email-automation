@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -62,6 +63,42 @@ func (p *Pool) Start(ctx context.Context) error {
 		return fmt.Errorf("initial worker refresh: %w", err)
 	}
 
+	// Subscribe to deferred action events from NATS
+	if p.bus != nil {
+		if _, err := p.bus.Subscribe(natsbus.SubjectDeferredAction, func(data []byte) {
+			var event natsbus.DeferredActionEvent
+			if err := json.Unmarshal(data, &event); err != nil {
+				log.Error().Err(err).Msg("failed to unmarshal deferred action event")
+				return
+			}
+			log.Info().
+				Int64("action_id", event.ActionID).
+				Int64("account_id", event.AccountID).
+				Str("action", event.Action).
+				Str("message_id", event.MessageID).
+				Msg("received deferred action event")
+
+			w := p.getWorker(event.AccountID)
+			if w == nil {
+				log.Error().
+					Int64("account_id", event.AccountID).
+					Msg("no worker found for account, cannot execute deferred action")
+				return
+			}
+
+			if err := w.ExecuteDeferredAction(ctx, &event); err != nil {
+				log.Error().Err(err).
+					Int64("action_id", event.ActionID).
+					Str("action", event.Action).
+					Msg("failed to execute deferred action")
+			}
+		}); err != nil {
+			log.Error().Err(err).Msg("failed to subscribe to deferred action events")
+		} else {
+			log.Info().Msg("subscribed to deferred action events on NATS")
+		}
+	}
+
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -92,6 +129,13 @@ func (p *Pool) Stop() {
 		w.Stop()
 		delete(p.workers, id)
 	}
+}
+
+// getWorker returns the worker for a given account ID, or nil if not found.
+func (p *Pool) getWorker(accountID int64) *Worker {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.workers[accountID]
 }
 
 func (p *Pool) refreshWorkers(ctx context.Context) error {
@@ -209,7 +253,7 @@ func (w *Worker) connect() (*imapclient.Client, error) {
 	if port == 0 {
 		port = 993
 	}
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	logger := log.With().
 		Int64("account_id", w.account.ID).
@@ -799,6 +843,8 @@ func (w *Worker) processMessage(ctx context.Context, client *imapclient.Client, 
 		actionErr = w.executeMove(client, uidSet, result.Target)
 	case "archive":
 		actionErr = w.executeMove(client, uidSet, "Archive")
+	case "flag":
+		actionErr = w.executeFlag(client, uidSet, result.Target)
 	case "notify":
 		actionErr = w.executeNotify(ctx, email, matchedRule.Name, result.Target)
 	case "keep":
@@ -871,6 +917,147 @@ func (w *Worker) executeNotify(ctx context.Context, email *models.EmailContext, 
 	text = strings.ReplaceAll(text, "{sender_name}", email.SenderName)
 
 	return w.notifier.SendMessage(ctx, text)
+}
+
+// executeFlag sets an IMAP flag on messages.
+func (w *Worker) executeFlag(client *imapclient.Client, uidSet imap.UIDSet, flagName string) error {
+	imapFlag := flagNameToIMAP(flagName)
+
+	storeCmd := client.Store(uidSet, &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{imapFlag},
+	}, nil)
+	if err := storeCmd.Close(); err != nil {
+		return fmt.Errorf("store flag %s: %w", flagName, err)
+	}
+
+	log.Info().Str("uids", uidSet.String()).Str("flag", string(imapFlag)).Msg("flagged message(s)")
+	return nil
+}
+
+// executeFlagByMessageID searches for a message by Message-ID and sets a flag on it.
+func (w *Worker) executeFlagByMessageID(client *imapclient.Client, messageID, flagName string) error {
+	criteria := &imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{
+			{Key: "Message-ID", Value: messageID},
+		},
+	}
+	searchCmd := client.UIDSearch(criteria, nil)
+	searchData, err := searchCmd.Wait()
+	if err != nil {
+		return fmt.Errorf("search for message %s: %w", messageID, err)
+	}
+
+	uids := searchData.AllUIDs()
+	if len(uids) == 0 {
+		log.Warn().Str("message_id", messageID).Msg("message not found for flag action")
+		return nil
+	}
+
+	uidSet := imap.UIDSetNum(uids[0])
+	return w.executeFlag(client, uidSet, flagName)
+}
+
+// flagNameToIMAP converts a human-friendly flag name to an IMAP flag.
+func flagNameToIMAP(name string) imap.Flag {
+	switch strings.ToLower(name) {
+	case "flagged", "starred":
+		return imap.FlagFlagged
+	case "seen", "read":
+		return imap.FlagSeen
+	case "answered", "replied":
+		return imap.FlagAnswered
+	case "draft":
+		return imap.FlagDraft
+	case "deleted":
+		return imap.FlagDeleted
+	case "junk", "spam":
+		return "$Junk"
+	case "notjunk":
+		return "$NotJunk"
+	default:
+		return imap.Flag(name)
+	}
+}
+
+// ExecuteDeferredAction executes a deferred action event by finding the message
+// in IMAP by its Message-ID header and performing the requested action.
+func (w *Worker) ExecuteDeferredAction(ctx context.Context, event *natsbus.DeferredActionEvent) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Int64("action_id", event.ActionID).
+		Str("message_id", event.MessageID).
+		Str("action", event.Action).
+		Logger()
+
+	logger.Info().Msg("executing deferred action")
+
+	client, err := w.connect()
+	if err != nil {
+		return fmt.Errorf("connect for deferred action: %w", err)
+	}
+
+	// Select INBOX to search for the message
+	selectCmd := client.Select("INBOX", nil)
+	if _, err := selectCmd.Wait(); err != nil {
+		return fmt.Errorf("select INBOX for deferred action: %w", err)
+	}
+
+	// Search for the message by Message-ID header
+	criteria := &imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{
+			{Key: "Message-ID", Value: event.MessageID},
+		},
+	}
+	searchCmd := client.UIDSearch(criteria, nil)
+	searchData, err := searchCmd.Wait()
+	if err != nil {
+		return fmt.Errorf("search for message %s: %w", event.MessageID, err)
+	}
+
+	uids := searchData.AllUIDs()
+	if len(uids) == 0 {
+		logger.Warn().Msg("message not found in INBOX for deferred action (may have been moved or deleted)")
+		return nil
+	}
+
+	uidSet := imap.UIDSetNum(uids[0])
+
+	switch event.Action {
+	case "delete":
+		if err := w.executeDelete(client, uidSet); err != nil {
+			return fmt.Errorf("deferred delete: %w", err)
+		}
+		logger.Info().Msg("deferred delete executed")
+	case "move":
+		if err := w.executeMove(client, uidSet, event.Target); err != nil {
+			return fmt.Errorf("deferred move to %s: %w", event.Target, err)
+		}
+		logger.Info().Str("target", event.Target).Msg("deferred move executed")
+	case "archive":
+		if err := w.executeMove(client, uidSet, "Archive"); err != nil {
+			return fmt.Errorf("deferred archive: %w", err)
+		}
+		logger.Info().Msg("deferred archive executed")
+	case "notify":
+		if err := w.executeNotify(ctx, &models.EmailContext{
+			MessageID:     event.MessageID,
+			SenderAddress: "deferred",
+			Subject:       "Deferred action",
+		}, "deferred", event.Target); err != nil {
+			return fmt.Errorf("deferred notify: %w", err)
+		}
+		logger.Info().Msg("deferred notify executed")
+	case "flag":
+		if err := w.executeFlagByMessageID(client, event.MessageID, event.Target); err != nil {
+			return fmt.Errorf("deferred flag: %w", err)
+		}
+		logger.Info().Str("flag", event.Target).Msg("deferred flag executed")
+	default:
+		logger.Warn().Str("action", event.Action).Msg("unknown deferred action type")
+	}
+
+	return nil
 }
 
 // Ensure mail and io imports are used (for header parsing)

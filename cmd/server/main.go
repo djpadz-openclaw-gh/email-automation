@@ -12,6 +12,7 @@ import (
 
 	"github.com/djpadz/email-automation/internal/api"
 	"github.com/djpadz/email-automation/internal/config"
+	"github.com/djpadz/email-automation/internal/crypto"
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/engine"
 	"github.com/djpadz/email-automation/internal/imap"
@@ -41,8 +42,27 @@ func main() {
 	log.Info().Msg("connected to database")
 
 	// Run migrations
-	if err := database.RunMigrations(ctx, "./migrations"); err != nil {
+	if err := database.RunMigrations(ctx, cfg.MigrationsDir); err != nil {
 		log.Fatal().Err(err).Msg("failed to run migrations")
+	}
+
+	// Password encryption
+	if cfg.EncryptionMasterKey != "" {
+		// Build key map: current key + any previous versions
+		keys := make(map[int]string)
+		keys[cfg.EncryptionMasterKeyVersion] = cfg.EncryptionMasterKey
+		for v, k := range cfg.EncryptionPreviousKeys {
+			keys[v] = k
+		}
+
+		enc, encErr := crypto.NewVersionedEncryptor(keys, cfg.EncryptionMasterKeyVersion)
+		if encErr != nil {
+			log.Fatal().Err(encErr).Msg("failed to initialize password encryption")
+		}
+		database.SetEncryptor(enc)
+		log.Info().Int("version", cfg.EncryptionMasterKeyVersion).Int("total_keys", len(keys)).Msg("password encryption enabled")
+	} else {
+		log.Warn().Msg("ENCRYPTION_MASTER_KEY not set, passwords stored in plaintext")
 	}
 
 	// NATS
@@ -72,6 +92,9 @@ func main() {
 
 	// Scheduler
 	sched := scheduler.New(database, telegram, cfg.SchedulerInterval)
+	if bus != nil {
+		sched.SetBus(bus)
+	}
 	go sched.Start(ctx)
 	defer sched.Stop()
 

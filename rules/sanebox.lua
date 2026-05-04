@@ -7,20 +7,16 @@ local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
 -- Match by sender domain
-if sender:find("sanebox.com", 1, true) then
+if sender:match("sanebox%.com") then
     return delete("SaneBox digest, older than 24h")
 end
 
 -- Match by subject phrases
-local phrases = {
+if contains_any(subject, {
     "sanebox", "your sane", "sane digest", "sane black hole",
     "sanelater", "sane inbox", "emails you've missed", "digest from sanebox",
-}
-
-for _, phrase in ipairs(phrases) do
-    if subject:find(phrase, 1, true) then
-        return delete("SaneBox digest (subject match), older than 24h")
-    end
+}) then
+    return delete("SaneBox digest (subject match), older than 24h")
 end
 
 return skip()

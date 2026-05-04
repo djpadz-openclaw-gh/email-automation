@@ -2,42 +2,21 @@
 -- Move original IronPort alert emails to @Ironport.
 -- Skip replies (Re:/Fwd:/etc.).
 
-local subject = email.subject or ""
-local sender = email.sender_address:lower()
-local sender_name = (email.sender_name or ""):lower()
-
--- Skip replies
 if is_reply() then return skip() end
 
--- Check sender patterns
-local sender_patterns = {
-    "alert@mx%d+%.ctb%.padz%.net",
-    "alert@sma%.ctb%.padz%.net",
-}
+local sender = email.sender_address:lower()
+local sender_name = (email.sender_name or ""):lower()
+local subject = email.subject:lower()
 
-local subject_keywords = {
-    "ironport",
-    "spam quarantine",
-    "cisco secure email",
-    "email security appliance",
-}
+-- Check sender patterns (Lua patterns, not plain text)
+local sender_match = sender:match("alert@mx%d+%.ctb%.padz%.net") or
+                     sender:match("alert@sma%.ctb%.padz%.net") or
+                     sender_name:match("alert@mx%d+%.ctb%.padz%.net") or
+                     sender_name:match("alert@sma%.ctb%.padz%.net")
 
-local sender_match = false
-for _, pattern in ipairs(sender_patterns) do
-    if sender:find(pattern) or sender_name:find(pattern) then
-        sender_match = true
-        break
-    end
-end
-
-local subject_match = false
-local subject_l = subject:lower()
-for _, kw in ipairs(subject_keywords) do
-    if subject_l:find(kw, 1, true) then
-        subject_match = true
-        break
-    end
-end
+local subject_match = contains_any(subject, {
+    "ironport", "spam quarantine", "cisco secure email", "email security appliance",
+})
 
 if not (sender_match or subject_match) then return skip() end
 

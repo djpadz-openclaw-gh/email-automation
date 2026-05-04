@@ -381,6 +381,14 @@ func registerActions(L *lua.LState) {
 		resultTbl.RawSetString("deferred_action", lua.LString("delete"))
 		return 0
 	}))
+
+	// flag(flag_name, reason?) - set an IMAP flag on the message
+	L.SetGlobal("flag", L.NewFunction(func(L *lua.LState) int {
+		flagName := L.CheckString(1)
+		reason := L.OptString(2, "")
+		setResult(L, "flag", flagName, 0, reason)
+		return 0
+	}))
 }
 
 func setResult(L *lua.LState, action, target string, delay int, reason string) {

@@ -4,7 +4,7 @@
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-if not sender:find("morganstanley.com", 1, true) then return skip() end
+if not sender:match("morganstanley%.com") then return skip() end
 
 local keywords = {
     "mobile check deposit", "deposit", "transfer", "statement",
@@ -12,15 +12,7 @@ local keywords = {
     "withdrawal", "confirmation",
 }
 
-local match = false
-for _, kw in ipairs(keywords) do
-    if subject:find(kw, 1, true) then
-        match = true
-        break
-    end
-end
-
-if not match then return skip() end
+if not contains_any(subject, keywords) then return skip() end
 
 if not older_than_hours(24) then
     return keep("Morgan Stanley notification, keeping until 24h old")

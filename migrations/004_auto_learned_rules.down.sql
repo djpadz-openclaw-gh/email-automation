@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS detected_moves;
+DROP TABLE IF EXISTS message_locations;
+ALTER TABLE rules DROP COLUMN IF EXISTS approved;
+ALTER TABLE rules DROP COLUMN IF EXISTS source;

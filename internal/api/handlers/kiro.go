@@ -285,6 +285,43 @@ type anthropicResponse struct {
 	} `json:"error"`
 }
 
+// stripMarkdownCodeBlock removes markdown code fences (```lua ... ``` or ``` ... ```)
+// from text that the AI may wrap its response in despite being told not to.
+func stripMarkdownCodeBlock(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	// Check if the text starts with a code fence
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 2 {
+		return trimmed
+	}
+
+	firstLine := strings.TrimSpace(lines[0])
+	if !strings.HasPrefix(firstLine, "```") {
+		return trimmed
+	}
+
+	// Find the closing fence
+	lastIdx := -1
+	for i := len(lines) - 1; i > 0; i-- {
+		if strings.TrimSpace(lines[i]) == "```" {
+			lastIdx = i
+			break
+		}
+	}
+
+	if lastIdx <= 0 {
+		// No closing fence found — strip just the opening fence line
+		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+
+	// Return everything between the fences
+	return strings.TrimSpace(strings.Join(lines[1:lastIdx], "\n"))
+}
+
 // looksLikeLua checks whether text appears to be valid Lua code by inspecting
 // the first non-empty line for common Lua tokens.
 func looksLikeLua(text string) bool {
@@ -406,6 +443,9 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
 	}
 
+	// Strip markdown code fences that the AI may include despite instructions
+	luaCode = stripMarkdownCodeBlock(luaCode)
+
 	// If the response doesn't look like Lua code, return it as an error
 	// so the frontend can show a banner instead of replacing the editor content.
 	if !looksLikeLua(luaCode) {
@@ -510,7 +550,8 @@ func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 	// Find the text block, skipping thinking blocks
 	for _, block := range apiResp.Content {
 		if block.Type == "text" {
-			text := block.Text
+			// Strip markdown code fences that the AI may include despite instructions
+			text := stripMarkdownCodeBlock(block.Text)
 			// If the response doesn't look like Lua, return an error field
 			// so the frontend can show a banner instead of updating the editor.
 			if !looksLikeLua(text) {

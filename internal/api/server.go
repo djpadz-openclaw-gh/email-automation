@@ -131,6 +131,16 @@ func (s *Server) setupRoutes() {
 	tenantH := &handlers.TenantHandlers{DB: s.db}
 	admin.Get("/tenants", tenantH.ListTenants)
 	admin.Post("/tenants", tenantH.CreateTenant)
+	admin.Post("/rotate-encryption-keys", func(c *fiber.Ctx) error {
+		rotated, err := s.db.RotateEncryptionKeys(c.Context())
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"message": "encryption key rotation complete",
+			"rotated": rotated,
+		})
+	})
 
 	// API v1 (JWT + API key auth)
 	v1 := s.app.Group("/api/v1")
@@ -146,6 +156,16 @@ func (s *Server) setupRoutes() {
 	v1.Post("/rules/test", ruleH.TestRule)
 	v1.Post("/rules/validate", ruleH.ValidateRule)
 	v1.Get("/logs", ruleH.ListExecutionLogs)
+	v1.Get("/rules/suggested", ruleH.ListSuggestedRules)
+	v1.Post("/rules/:id/approve", ruleH.ApproveRule)
+	v1.Post("/rules/:id/dry-run", ruleH.DryRunRule)
+	v1.Post("/rules/:id/execute", ruleH.ExecuteRule)
+	v1.Post("/rules/:id/cancel", ruleH.CancelOperation)
+
+	// Deferred actions
+	v1.Get("/deferred-actions", ruleH.ListDeferredActions)
+	v1.Delete("/deferred-actions/:id", ruleH.CancelDeferredAction)
+	v1.Patch("/rules/reorder", ruleH.ReorderRules)
 
 	// Accounts
 	accountH := &handlers.AccountHandlers{DB: s.db}
