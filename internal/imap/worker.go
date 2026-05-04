@@ -359,6 +359,23 @@ func (w *Worker) poll(ctx context.Context) error {
 	}
 
 	uids := searchData.AllUIDs()
+
+	// Get ALL messages in INBOX (not just unseen) for move detection
+	allCriteria := &imap.SearchCriteria{}
+	allSearchCmd := client.UIDSearch(allCriteria, nil)
+	allSearchData, err := allSearchCmd.Wait()
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to search all messages for move detection")
+	} else {
+		allUIDs := allSearchData.AllUIDs()
+		// Detect moves in background to avoid blocking message processing
+		go func() {
+			if err := w.detectAndLearnFromMoves(ctx, client, allUIDs); err != nil {
+				logger.Warn().Err(err).Msg("move detection failed")
+			}
+		}()
+	}
+
 	if len(uids) == 0 {
 		logger.Debug().Msg("no unseen messages")
 		if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
@@ -1058,6 +1075,300 @@ func (w *Worker) ExecuteDeferredAction(ctx context.Context, event *natsbus.Defer
 	}
 
 	return nil
+}
+
+// detectAndLearnFromMoves checks for messages that were moved out of INBOX and learns rules from them.
+func (w *Worker) detectAndLearnFromMoves(ctx context.Context, client *imapclient.Client, currentInboxUIDs []imap.UID) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Logger()
+
+	// Get all messages currently in INBOX with their metadata
+	currentMessages := make(map[string]*models.EmailContext) // messageID -> EmailContext
+	for _, uid := range currentInboxUIDs {
+		uidSet := imap.UIDSetNum(uid)
+		fetchOptions := &imap.FetchOptions{
+			Envelope: true,
+			UID:      true,
+		}
+		fetchCmd := client.Fetch(uidSet, fetchOptions)
+		for {
+			msg := fetchCmd.Next()
+			if msg == nil {
+				break
+			}
+			buf, err := msg.Collect()
+			if err != nil {
+				continue
+			}
+			email := w.bufferToEmailContext(buf)
+			if email != nil {
+				currentMessages[email.MessageID] = email
+				// Record this message as being in INBOX
+				loc := &models.MessageLocation{
+					AccountID:  w.account.ID,
+					MessageUID: fmt.Sprintf("%d", buf.UID),
+					Folder:     "INBOX",
+					MessageID:  email.MessageID,
+					Sender:     email.SenderAddress,
+					Subject:    email.Subject,
+				}
+				if err := w.db.UpsertMessageLocation(ctx, loc); err != nil {
+					logger.Warn().Err(err).Str("message_id", email.MessageID).Msg("failed to record message location")
+				}
+			}
+		}
+		fetchCmd.Close()
+	}
+
+	// Get all known message locations for this account
+	rows, err := w.db.Pool.Query(ctx,
+		`SELECT DISTINCT message_id, sender, subject FROM message_locations WHERE account_id = $1 AND folder = 'INBOX' AND seen_at > NOW() - INTERVAL '7 days'`,
+		w.account.ID)
+	if err != nil {
+		return fmt.Errorf("query previous inbox messages: %w", err)
+	}
+	defer rows.Close()
+
+	var previousMessages []struct {
+		MessageID string
+		Sender    string
+		Subject   string
+	}
+	for rows.Next() {
+		var m struct {
+			MessageID string
+			Sender    string
+			Subject   string
+		}
+		if err := rows.Scan(&m.MessageID, &m.Sender, &m.Subject); err != nil {
+			continue
+		}
+		previousMessages = append(previousMessages, m)
+	}
+
+	// Find messages that were in INBOX but are no longer there
+	for _, prev := range previousMessages {
+		if _, exists := currentMessages[prev.MessageID]; !exists {
+			// Message was moved out of INBOX - find where it went
+			if err := w.findAndLearnFromMove(ctx, client, prev.MessageID, prev.Sender, prev.Subject); err != nil {
+				logger.Warn().Err(err).Str("message_id", prev.MessageID).Msg("failed to find and learn from move")
+			}
+		}
+	}
+
+	return nil
+}
+
+// findAndLearnFromMove searches for a message in other folders and learns a rule if found.
+func (w *Worker) findAndLearnFromMove(ctx context.Context, client *imapclient.Client, messageID, sender, subject string) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Str("message_id", messageID).
+		Logger()
+
+	// List all folders
+	listCmd := client.List("", "%", nil)
+	mailboxes, err := listCmd.Collect()
+	if err != nil {
+		return fmt.Errorf("list mailboxes: %w", err)
+	}
+
+	// Search for the message in each folder
+	for _, mbox := range mailboxes {
+		if mbox.Mailbox == "INBOX" {
+			continue // Skip INBOX since we already know it's not there
+		}
+
+		selectCmd := client.Select(mbox.Mailbox, nil)
+		if _, err := selectCmd.Wait(); err != nil {
+			continue // Skip folders we can't select
+		}
+
+		criteria := &imap.SearchCriteria{
+			Header: []imap.SearchCriteriaHeaderField{
+				{Key: "Message-ID", Value: messageID},
+			},
+		}
+		searchCmd := client.UIDSearch(criteria, nil)
+		searchData, err := searchCmd.Wait()
+		if err != nil {
+			continue
+		}
+
+		uids := searchData.AllUIDs()
+		if len(uids) > 0 {
+			// Found the message in this folder
+			logger.Info().Str("folder", mbox.Mailbox).Msg("found moved message")
+
+			// Record the move
+			move := &models.DetectedMove{
+				AccountID:  w.account.ID,
+				MessageUID: fmt.Sprintf("%d", uids[0]),
+				MessageID:  messageID,
+				Sender:     sender,
+				Subject:    subject,
+				FromFolder: "INBOX",
+				ToFolder:   mbox.Mailbox,
+			}
+			if err := w.db.RecordDetectedMove(ctx, move); err != nil {
+				logger.Warn().Err(err).Msg("failed to record detected move")
+				return nil
+			}
+
+			// Generate and create a rule based on heuristics
+			if err := w.generateAndCreateRuleFromMove(ctx, sender, subject, mbox.Mailbox); err != nil {
+				logger.Warn().Err(err).Msg("failed to generate rule from move")
+			}
+
+			return nil
+		}
+	}
+
+	return nil
+}
+
+// generateAndCreateRuleFromMove creates a rule based on the move heuristics.
+func (w *Worker) generateAndCreateRuleFromMove(ctx context.Context, sender, subject, targetFolder string) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Str("sender", sender).
+		Str("target_folder", targetFolder).
+		Logger()
+
+	var ruleName string
+	var luaCode string
+
+	// Determine if sender is generic or complicated
+	if isGenericSender(sender) {
+		// Generic sender - create rule based on sender address
+		ruleName = fmt.Sprintf("Auto-learned: %s → %s", sender, targetFolder)
+		luaCode = fmt.Sprintf(`if contains(email.sender, "%s") then move("%s") end`, sender, targetFolder)
+	} else {
+		// Complicated sender - extract keywords from subject
+		keywords := extractSubjectKeywords(subject)
+		if len(keywords) == 0 {
+			// Fallback to sender domain if no keywords
+			domain := extractDomain(sender)
+			ruleName = fmt.Sprintf("Auto-learned: %s → %s", domain, targetFolder)
+			luaCode = fmt.Sprintf(`if contains(email.sender_domain, "%s") then move("%s") end`, domain, targetFolder)
+		} else {
+			// Create rule based on sender domain + subject keywords
+			domain := extractDomain(sender)
+			ruleName = fmt.Sprintf("Auto-learned: %s + keywords → %s", domain, targetFolder)
+
+			// Build Lua code with domain and keywords
+			luaCode = fmt.Sprintf(`if contains(email.sender_domain, "%s")`, domain)
+			for _, kw := range keywords {
+				luaCode += fmt.Sprintf(` and contains(email.subject, "%s")`, kw)
+			}
+			luaCode += fmt.Sprintf(` then move("%s") end`, targetFolder)
+		}
+	}
+
+	// Create the rule in the database
+	rule := &models.Rule{
+		TenantID:    w.account.TenantID,
+		Name:        ruleName,
+		LuaCode:     luaCode,
+		Active:      false, // Auto-learned rules start as inactive
+		Source:      "auto-learned",
+		Approved:    false,
+	}
+
+	if err := w.db.CreateRule(ctx, rule); err != nil {
+		return fmt.Errorf("create rule: %w", err)
+	}
+
+	logger.Info().
+		Int64("rule_id", rule.ID).
+		Str("rule_name", ruleName).
+		Msg("created auto-learned rule")
+
+	return nil
+}
+
+// isGenericSender checks if a sender address appears to be generic (noreply@, billing@, etc.).
+func isGenericSender(sender string) bool {
+	genericPrefixes := []string{
+		"noreply@",
+		"no-reply@",
+		"billing@",
+		"support@",
+		"info@",
+		"notifications@",
+		"alerts@",
+		"admin@",
+		"contact@",
+		"hello@",
+		"team@",
+		"service@",
+		"automated@",
+	}
+
+	lowerSender := strings.ToLower(sender)
+	for _, prefix := range genericPrefixes {
+		if strings.HasPrefix(lowerSender, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractDomain extracts the domain from an email address.
+func extractDomain(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return email
+}
+
+// extractSubjectKeywords extracts meaningful keywords from a subject line.
+func extractSubjectKeywords(subject string) []string {
+	// Simple keyword extraction - split on common delimiters and filter
+	stopwords := map[string]bool{
+		"the": true, "a": true, "an": true, "and": true, "or": true, "but": true,
+		"in": true, "on": true, "at": true, "to": true, "for": true, "of": true,
+		"is": true, "are": true, "was": true, "were": true, "be": true,
+		"your": true, "my": true, "our": true, "their": true,
+	}
+
+	// Remove common subject prefixes
+	subject = strings.TrimPrefix(subject, "Re: ")
+	subject = strings.TrimPrefix(subject, "Fwd: ")
+	subject = strings.TrimPrefix(subject, "[")
+
+	// Extract bracketed tags like [MARKETING], [ANNOUNCE], etc.
+	var keywords []string
+	if idx := strings.Index(subject, "["); idx >= 0 {
+		if endIdx := strings.Index(subject[idx:], "]"); endIdx >= 0 {
+			tag := subject[idx+1 : idx+endIdx]
+			if len(tag) > 0 && len(tag) < 50 {
+				keywords = append(keywords, tag)
+			}
+		}
+	}
+
+	// Split on common delimiters and extract meaningful words
+	words := strings.FieldsFunc(subject, func(r rune) bool {
+		return r == ' ' || r == '-' || r == ':' || r == '|'
+	})
+
+	for _, word := range words {
+		word = strings.ToLower(word)
+		word = strings.Trim(word, ".,!?;()[]{}")
+
+		// Skip stopwords and very short words
+		if len(word) > 3 && !stopwords[word] {
+			keywords = append(keywords, word)
+			if len(keywords) >= 3 { // Limit to 3 keywords
+				break
+			}
+		}
+	}
+
+	return keywords
 }
 
 // Ensure mail and io imports are used (for header parsing)
