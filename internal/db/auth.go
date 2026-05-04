@@ -12,20 +12,24 @@ import (
 // --- User operations ---
 
 func (db *DB) CreateUser(ctx context.Context, u *models.User) error {
+	// Default ai_enabled to true for new users
+	if !u.AIEnabled {
+		u.AIEnabled = true
+	}
 	return db.Pool.QueryRow(ctx,
-		`INSERT INTO users (username, password_hash, totp_secret, totp_enabled)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO users (username, password_hash, totp_secret, totp_enabled, ai_enabled)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, created_at, updated_at`,
-		u.Username, u.PasswordHash, u.TOTPSecret, u.TOTPEnabled,
+		u.Username, u.PasswordHash, u.TOTPSecret, u.TOTPEnabled, u.AIEnabled,
 	).Scan(&u.ID, &u.CreatedAt, &u.UpdatedAt)
 }
 
 func (db *DB) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, totp_secret, totp_enabled, created_at, updated_at
+		`SELECT id, username, password_hash, totp_secret, totp_enabled, ai_enabled, created_at, updated_at
 		 FROM users WHERE username = $1`, username,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.AIEnabled, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -35,9 +39,9 @@ func (db *DB) GetUserByUsername(ctx context.Context, username string) (*models.U
 func (db *DB) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, totp_secret, totp_enabled, created_at, updated_at
+		`SELECT id, username, password_hash, totp_secret, totp_enabled, ai_enabled, created_at, updated_at
 		 FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.AIEnabled, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +156,11 @@ func (db *DB) GetAPIKeysByUserID(ctx context.Context, userID int64) ([]models.AP
 func (db *DB) GetUserByAPIKeyHash(ctx context.Context, keyHash string) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT u.id, u.username, u.password_hash, u.totp_secret, u.totp_enabled, u.created_at, u.updated_at
+		`SELECT u.id, u.username, u.password_hash, u.totp_secret, u.totp_enabled, u.ai_enabled, u.created_at, u.updated_at
 		 FROM users u
 		 JOIN api_keys ak ON ak.user_id = u.id
 		 WHERE ak.key_hash = $1`, keyHash,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.AIEnabled, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +219,70 @@ func (db *DB) CountRecentFailedAttempts(ctx context.Context, username, ip string
 		username, ip, time.Now().Add(-window),
 	).Scan(&count)
 	return count, err
+}
+
+// --- Admin user operations ---
+
+// ListAllUsers returns all users (for admin use).
+func (db *DB) ListAllUsers(ctx context.Context) ([]models.User, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, username, password_hash, totp_secret, totp_enabled, ai_enabled, created_at, updated_at
+		 FROM users ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.AIEnabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+// UpdateUserAIEnabled sets the ai_enabled flag for a user.
+func (db *DB) UpdateUserAIEnabled(ctx context.Context, userID int64, aiEnabled bool) error {
+	tag, err := db.Pool.Exec(ctx,
+		`UPDATE users SET ai_enabled = $1, updated_at = NOW() WHERE id = $2`,
+		aiEnabled, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// GetUserAIEnabled returns whether AI is enabled for a user.
+func (db *DB) GetUserAIEnabled(ctx context.Context, userID int64) (bool, error) {
+	var aiEnabled bool
+	err := db.Pool.QueryRow(ctx,
+		`SELECT ai_enabled FROM users WHERE id = $1`, userID,
+	).Scan(&aiEnabled)
+	if err != nil {
+		return false, err
+	}
+	return aiEnabled, nil
+}
+
+// GetUserIDByTenantID returns the user_id associated with a tenant.
+func (db *DB) GetUserIDByTenantID(ctx context.Context, tenantID int64) (int64, error) {
+	var userID *int64
+	err := db.Pool.QueryRow(ctx,
+		`SELECT user_id FROM tenants WHERE id = $1`, tenantID,
+	).Scan(&userID)
+	if err != nil {
+		return 0, err
+	}
+	if userID == nil {
+		return 0, fmt.Errorf("tenant has no associated user")
+	}
+	return *userID, nil
 }
 
 // --- Tenant-user association ---

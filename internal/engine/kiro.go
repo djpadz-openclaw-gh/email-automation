@@ -18,10 +18,12 @@ import (
 
 // KiroClient handles API calls to the Kiro/Anthropic API for semantic evaluation.
 type KiroClient struct {
-	apiKey  string
-	apiURL  string
-	client  *http.Client
-	cache   *kiroCache
+	apiKey      string
+	apiURL      string
+	textModel   string
+	visionModel string
+	client      *http.Client
+	cache       *kiroCache
 }
 
 // kiroCache provides thread-safe caching for Kiro API responses.
@@ -38,14 +40,22 @@ type kiroCacheEntry struct {
 }
 
 // NewKiroClient creates a new KiroClient for semantic evaluation.
-func NewKiroClient(apiKey, apiURL string) *KiroClient {
+func NewKiroClient(apiKey, apiURL, textModel, visionModel string) *KiroClient {
 	if apiURL == "" {
 		apiURL = "https://api.anthropic.com/v1/messages"
 	}
+	if textModel == "" {
+		textModel = "claude-haiku-4.5"
+	}
+	if visionModel == "" {
+		visionModel = "claude-haiku-4.5"
+	}
 	return &KiroClient{
-		apiKey: apiKey,
-		apiURL: apiURL,
-		client: &http.Client{Timeout: 30 * time.Second},
+		apiKey:      apiKey,
+		apiURL:      apiURL,
+		textModel:   textModel,
+		visionModel: visionModel,
+		client:      &http.Client{Timeout: 30 * time.Second},
 		cache: &kiroCache{
 			entries: make(map[string]*kiroCacheEntry),
 			maxSize: 500,
@@ -314,9 +324,8 @@ func (k *KiroClient) askYesNoWithImages(systemPrompt, userText string, images []
 		Text: userText,
 	})
 
-	// Use claude-sonnet for vision — haiku doesn't support images well
 	reqBody := kiroAPIRequest{
-		Model:     "claude-sonnet-4-20250514",
+		Model:     k.visionModel,
 		MaxTokens: 10,
 		System:    systemPrompt,
 		Messages: []kiroAPIMessage{
@@ -335,7 +344,7 @@ func (k *KiroClient) askYesNoWithImages(systemPrompt, userText string, images []
 // askYesNo sends a text-only prompt to the API and interprets the response as yes/no.
 func (k *KiroClient) askYesNo(systemPrompt, userMessage string) (bool, error) {
 	reqBody := kiroAPIRequest{
-		Model:     "claude-haiku-4.5",
+		Model:     k.textModel,
 		MaxTokens: 10,
 		System:    systemPrompt,
 		Messages: []kiroAPIMessage{

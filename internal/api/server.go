@@ -142,6 +142,12 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
+	// Admin user management
+	adminUserH := &handlers.AdminUserHandlers{DB: s.db}
+	admin.Get("/users", adminUserH.ListUsers)
+	admin.Get("/users/:userId", adminUserH.GetUser)
+	admin.Patch("/users/:userId/ai-enabled", adminUserH.UpdateAIEnabled)
+
 	// API v1 (JWT + API key auth)
 	v1 := s.app.Group("/api/v1")
 	v1.Use(middleware.JWTAuthMiddleware(s.db, s.jwt))

@@ -59,7 +59,7 @@ func main() {
 	// Rule engine (for test/validate/dry-run endpoints)
 	var kiroClient *engine.KiroClient
 	if cfg.KiroAPIKey != "" {
-		kiroClient = engine.NewKiroClient(cfg.KiroAPIKey, cfg.KiroAPIURL)
+		kiroClient = engine.NewKiroClient(cfg.KiroAPIKey, cfg.KiroAPIURL, cfg.KiroTextModel, cfg.KiroVisionModel)
 		log.Info().Msg("kiro semantic evaluation enabled")
 	}
 	eng := engine.NewWithKiro(kiroClient)

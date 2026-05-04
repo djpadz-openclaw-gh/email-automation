@@ -131,6 +131,7 @@ type worker struct {
 	stopCh       chan struct{}
 	client       *imapclient.Client
 	clientMu     sync.Mutex
+	mailboxCh    chan struct{} // signaled by UnilateralDataHandler on new mail
 }
 
 func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTimeout, pollInterval time.Duration) *worker {
@@ -141,6 +142,7 @@ func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTi
 		idleTimeout:  idleTimeout,
 		pollInterval: pollInterval,
 		stopCh:       make(chan struct{}),
+		mailboxCh:    make(chan struct{}, 1),
 	}
 }
 
@@ -165,17 +167,103 @@ func (w *worker) run(ctx context.Context) {
 		default:
 		}
 
-		if err := w.poll(ctx); err != nil {
-			logger.Error().Err(err).Msg("poll cycle failed")
+		if err := w.idleLoop(ctx); err != nil {
+			logger.Error().Err(err).Msg("IDLE loop failed, reconnecting")
 			w.disconnect()
-		}
 
+			// Back off before reconnecting
+			select {
+			case <-ctx.Done():
+				return
+			case <-w.stopCh:
+				return
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}
+}
+
+// idleLoop connects, does an initial poll, then enters IMAP IDLE to wait
+// for real-time notifications of new messages. It returns on error or
+// when the worker is stopped.
+func (w *worker) idleLoop(ctx context.Context) error {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Str("email", w.account.Email).
+		Logger()
+
+	client, err := w.connect()
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+
+	// Select INBOX
+	selectCmd := client.Select("INBOX", nil)
+	if _, err := selectCmd.Wait(); err != nil {
+		return fmt.Errorf("select INBOX: %w", err)
+	}
+
+	// Initial poll for any unseen messages
+	if err := w.pollUnseen(ctx, client); err != nil {
+		return fmt.Errorf("initial poll: %w", err)
+	}
+
+	logger.Info().Msg("entering IMAP IDLE mode")
+
+	// IDLE loop: enter IDLE, wait for notification, poll, repeat
+	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-w.stopCh:
-			return
-		case <-time.After(w.pollInterval):
+			return nil
+		default:
+		}
+
+		// Drain any pending notifications before entering IDLE
+		select {
+		case <-w.mailboxCh:
+		default:
+		}
+
+		// Enter IDLE
+		idleCmd, err := client.Idle()
+		if err != nil {
+			return fmt.Errorf("start IDLE: %w", err)
+		}
+
+		logger.Debug().Msg("IDLE started, waiting for server notifications")
+
+		// Wait for: new mail notification, idle timeout, or stop signal
+		var idleInterrupted bool
+		select {
+		case <-w.mailboxCh:
+			logger.Debug().Msg("new mail notification received during IDLE")
+			idleInterrupted = true
+		case <-time.After(w.idleTimeout):
+			logger.Debug().Msg("IDLE timeout reached, will re-poll")
+			idleInterrupted = true
+		case <-ctx.Done():
+			idleCmd.Close()
+			return ctx.Err()
+		case <-w.stopCh:
+			idleCmd.Close()
+			return nil
+		}
+
+		// Stop IDLE so we can issue commands
+		if idleInterrupted {
+			if err := idleCmd.Close(); err != nil {
+				return fmt.Errorf("close IDLE: %w", err)
+			}
+			if err := idleCmd.Wait(); err != nil {
+				return fmt.Errorf("wait IDLE: %w", err)
+			}
+		}
+
+		// Poll for new messages
+		if err := w.pollUnseen(ctx, client); err != nil {
+			return fmt.Errorf("poll after IDLE: %w", err)
 		}
 	}
 }
@@ -199,9 +287,36 @@ func (w *worker) connect() (*imapclient.Client, error) {
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
+	// Set up unilateral data handler to receive new-mail notifications during IDLE
 	opts := &imapclient.Options{
 		TLSConfig: &tls.Config{
 			ServerName: host,
+		},
+		UnilateralDataHandler: &imapclient.UnilateralDataHandler{
+			Mailbox: func(data *imapclient.UnilateralDataMailbox) {
+				if data.NumMessages != nil {
+					log.Debug().
+						Int64("account_id", w.account.ID).
+						Uint32("num_messages", *data.NumMessages).
+						Msg("mailbox update received")
+					// Non-blocking send to signal new mail
+					select {
+					case w.mailboxCh <- struct{}{}:
+					default:
+					}
+				}
+			},
+			Expunge: func(seqNum uint32) {
+				log.Debug().
+					Int64("account_id", w.account.ID).
+					Uint32("seq_num", seqNum).
+					Msg("expunge notification received")
+				// Signal to re-check state
+				select {
+				case w.mailboxCh <- struct{}{}:
+				default:
+				}
+			},
 		},
 	}
 
@@ -254,34 +369,15 @@ func (w *worker) disconnect() {
 	}
 }
 
-// poll checks for new messages and publishes them to JetStream.
-func (w *worker) poll(ctx context.Context) error {
+// pollUnseen searches for unseen messages on an already-selected mailbox
+// and publishes them to JetStream.
+func (w *worker) pollUnseen(ctx context.Context, client *imapclient.Client) error {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
 		Str("email", w.account.Email).
 		Logger()
 
-	client, err := w.connect()
-	if err != nil {
-		return fmt.Errorf("connect: %w", err)
-	}
-
-	logger.Debug().Msg("polling for new messages")
-
-	selectCmd := client.Select("INBOX", nil)
-	mbox, err := selectCmd.Wait()
-	if err != nil {
-		return fmt.Errorf("select INBOX: %w", err)
-	}
-
-	logger.Debug().Uint32("messages", mbox.NumMessages).Msg("INBOX selected")
-
-	if mbox.NumMessages == 0 {
-		if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
-			logger.Warn().Err(err).Msg("failed to update sync time")
-		}
-		return nil
-	}
+	logger.Debug().Msg("polling for unseen messages")
 
 	criteria := &imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},

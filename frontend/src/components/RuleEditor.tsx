@@ -69,8 +69,11 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const [scanLimit, setScanLimit] = useState<number>(0); // 0 = all
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Detect kiro.* usage (any kiro function call)
-  const usesAi = /\bkiro\.\w+\s*\(/.test(luaCode);
+  // User-controlled AI toggle (initialized from rule or auto-detected from code)
+  const [usesAi, setUsesAi] = useState(() => {
+    if (rule) return rule.uses_ai;
+    return /\bkiro\.\w+\s*\(/.test(luaCode);
+  });
 
   // Detect kiro.classify usage specifically (for the performance warning)
   const usesAiClassify = /kiro\.classify\s*\(/.test(luaCode);
@@ -89,7 +92,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   const nlLastTypedRef = useRef(0);
 
   // Translate natural language → Lua (debounced)
-  const translateNlToLua = useCallback((text: string) => {
+  const translateNlToLua = useCallback((text: string, aiEnabled?: boolean) => {
     if (nlDebounceRef.current) clearTimeout(nlDebounceRef.current);
     if (!text.trim()) return;
 
@@ -98,7 +101,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
         setTranslating('nl2lua');
         setTranslationError('');
         setTranslationAiMessage('');
-        const code = await naturalLanguageToLua(text);
+        const code = await naturalLanguageToLua(text, aiEnabled);
         setLuaCode(code);
       } catch (err) {
         if (err instanceof KiroTranslationError) {
@@ -114,7 +117,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
   }, []);
 
   // Translate Lua → natural language (debounced)
-  const translateLuaToNl = useCallback((code: string) => {
+  const translateLuaToNl = useCallback((code: string, aiEnabled?: boolean) => {
     if (luaDebounceRef.current) clearTimeout(luaDebounceRef.current);
     if (!code.trim()) {
       setNaturalLanguage('');
@@ -126,7 +129,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
         setTranslating('lua2nl');
         setTranslationError('');
         setTranslationAiMessage('');
-        const desc = await luaToNaturalLanguage(code);
+        const desc = await luaToNaturalLanguage(code, aiEnabled);
         // Only update if the user is NOT actively typing in the NL box
         const recentlyTyped = Date.now() - nlLastTypedRef.current < 500;
         if (!nlFocusedRef.current || !recentlyTyped) {
@@ -145,19 +148,26 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
     setNaturalLanguage(text);
     setLastEditSource('nl');
     nlLastTypedRef.current = Date.now();
-    translateNlToLua(text);
+    translateNlToLua(text, usesAi);
   };
 
   // Handle Lua code changes
   const handleLuaChange = (code: string) => {
     setLuaCode(code);
     setLastEditSource('lua');
-    translateLuaToNl(code);
+    translateLuaToNl(code, usesAi);
+  };
+
+  // Handle Uses AI checkbox toggle
+  const handleUsesAiChange = (checked: boolean) => {
+    setUsesAi(checked);
+    // Trigger NL interpretation update with the new AI setting
+    translateLuaToNl(luaCode, checked);
   };
 
   // Generate NL interpretation on initial load
   useEffect(() => {
-    translateLuaToNl(luaCode);
+    translateLuaToNl(luaCode, usesAi);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -205,6 +215,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
         lua_code: luaCode,
         priority,
         active,
+        uses_ai: usesAi,
       };
 
       if (rule) {
@@ -295,19 +306,16 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
                 />
                 <span className="text-sm text-gray-700 dark:text-gray-300">Active</span>
               </label>
-              <label className="flex items-center gap-2 ml-6" title="Auto-detected: this rule uses AI (kiro.*) function calls">
+              <label className="flex items-center gap-2 ml-6 cursor-pointer" title="Enable AI (kiro.*) function calls in this rule">
                 <input
                   type="checkbox"
                   checked={usesAi}
-                  disabled
-                  className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 disabled:opacity-70"
+                  onChange={(e) => handleUsesAiChange(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                 />
-                <span className={`text-sm ${usesAi ? 'text-purple-700 dark:text-purple-400 font-medium' : 'text-gray-400 dark:text-gray-500'}`}>
+                <span className={`text-sm ${usesAi ? 'text-purple-700 dark:text-purple-400 font-medium' : 'text-gray-700 dark:text-gray-300'}`}>
                   🤖 Uses AI
                 </span>
-                {usesAi && (
-                  <span className="text-xs text-gray-400 dark:text-gray-500">(auto-detected)</span>
-                )}
               </label>
           </div>
 

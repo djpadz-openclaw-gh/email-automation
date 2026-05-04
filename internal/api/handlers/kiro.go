@@ -32,6 +32,7 @@ func NewKiroHandlers(cfg *config.Config) *KiroHandlers {
 // englishToLuaRequest is the request body for English → Lua translation.
 type englishToLuaRequest struct {
 	Description string `json:"description"`
+	UsesAI      *bool  `json:"uses_ai,omitempty"`
 }
 
 // englishToLuaResponse is the response body for English → Lua translation.
@@ -42,6 +43,7 @@ type englishToLuaResponse struct {
 // luaToEnglishRequest is the request body for Lua → English translation.
 type luaToEnglishRequest struct {
 	LuaCode string `json:"lua_code"`
+	UsesAI  *bool  `json:"uses_ai,omitempty"`
 }
 
 // luaToEnglishResponse is the response body for Lua → English translation.
@@ -424,6 +426,17 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 
 }
 
+// aiConstraint returns the AI usage constraint string to append to prompts.
+func aiConstraint(usesAI *bool) string {
+	if usesAI == nil {
+		return ""
+	}
+	if *usesAI {
+		return "\n\nYou may use AI when writing this script."
+	}
+	return "\n\nYou may NOT use AI when writing this script."
+}
+
 // TranslateEnglishToLua handles POST /api/kiro/translate/english-to-lua
 func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 	var req englishToLuaRequest
@@ -437,7 +450,8 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 
 	log.Info().Str("description", req.Description).Msg("translating English to Lua")
 
-	luaCode, err := h.callKiroAPI(englishToLuaSystemPrompt, req.Description)
+	prompt := englishToLuaSystemPrompt + aiConstraint(req.UsesAI)
+	luaCode, err := h.callKiroAPI(prompt, req.Description)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to translate English to Lua")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
@@ -472,7 +486,8 @@ func (h *KiroHandlers) TranslateLuaToEnglish(c *fiber.Ctx) error {
 
 	log.Info().Msg("translating Lua to English")
 
-	description, err := h.callKiroAPI(luaToEnglishSystemPrompt, req.LuaCode)
+	prompt := luaToEnglishSystemPrompt + aiConstraint(req.UsesAI)
+	description, err := h.callKiroAPI(prompt, req.LuaCode)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to translate Lua to English")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})

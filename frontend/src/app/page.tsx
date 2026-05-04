@@ -10,8 +10,9 @@ import LoginForm from '@/components/LoginForm';
 import RegisterForm from '@/components/RegisterForm';
 import Settings from '@/components/Settings';
 import DeferredActions from '@/components/DeferredActions';
+import AdminUsers from '@/components/AdminUsers';
 
-type Tab = 'rules' | 'accounts' | 'logs' | 'pending' | 'settings';
+type Tab = 'rules' | 'accounts' | 'logs' | 'pending' | 'admin' | 'settings';
 type AuthView = 'login' | 'register';
 
 export default function Home() {
@@ -126,6 +127,7 @@ export default function Home() {
               { id: 'accounts' as Tab, label: 'Accounts', icon: '📬' },
               { id: 'logs' as Tab, label: 'Activity Log', icon: '📋' },
               { id: 'pending' as Tab, label: 'Pending', icon: '⏳' },
+              { id: 'admin' as Tab, label: 'Admin', icon: '🔧' },
             ]).map((tab) => (
               <button
                 key={tab.id}
@@ -174,6 +176,7 @@ export default function Home() {
         {activeTab === 'accounts' && <AccountList />}
         {activeTab === 'logs' && <LogViewer />}
         {activeTab === 'pending' && <DeferredActions />}
+        {activeTab === 'admin' && <AdminUsers />}
         {activeTab === 'settings' && <Settings onBack={() => setActiveTab('rules')} />}
       </main>
     </div>

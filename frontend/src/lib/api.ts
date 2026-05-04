@@ -129,6 +129,15 @@ export interface AuthResponse {
   user: AuthUser;
 }
 
+export interface AdminUser {
+  id: number;
+  username: string;
+  ai_enabled: boolean;
+  totp_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PasskeyInfo {
   id: number;
   name: string;
@@ -489,6 +498,53 @@ class ApiClient {
     return this.request('/api/v1/rules/reorder', {
       method: 'PATCH',
       body: JSON.stringify({ rule_ids: ruleIds }),
+    });
+  }
+
+  // --- Admin (requires system API key) ---
+  private adminKey: string = '';
+
+  setAdminKey(key: string) {
+    this.adminKey = key;
+  }
+
+  private async adminRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string>),
+    };
+
+    if (this.adminKey) {
+      headers['X-API-Key'] = this.adminKey;
+    }
+
+    const url = API_URL ? `${API_URL}${path}` : path;
+    const res = await fetch(url, {
+      ...options,
+      headers,
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(body.error || `API error: ${res.status}`);
+    }
+
+    if (res.status === 204) return {} as T;
+    return res.json();
+  }
+
+  async adminListUsers(): Promise<{ users: AdminUser[] }> {
+    return this.adminRequest<{ users: AdminUser[] }>('/admin/users');
+  }
+
+  async adminGetUser(userId: number): Promise<AdminUser> {
+    return this.adminRequest<AdminUser>(`/admin/users/${userId}`);
+  }
+
+  async adminUpdateUserAI(userId: number, aiEnabled: boolean): Promise<{ message: string; user_id: number; ai_enabled: boolean }> {
+    return this.adminRequest(`/admin/users/${userId}/ai-enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ai_enabled: aiEnabled }),
     });
   }
 }

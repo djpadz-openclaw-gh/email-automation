@@ -90,8 +90,8 @@ func (h *RuleHandlers) CreateRule(c *fiber.Ctx) error {
 		rule.Approved = true
 	}
 
-	// Auto-detect AI usage from Lua code
-	rule.UsesAI = detectUsesAI(rule.LuaCode)
+	// Accept uses_ai from frontend; it's a user-controlled setting now.
+	// The frontend sends the value explicitly.
 
 	// Validate Lua syntax
 	if err := h.Engine.ValidateLua(rule.LuaCode); err != nil {
@@ -123,8 +123,8 @@ func (h *RuleHandlers) UpdateRule(c *fiber.Ctx) error {
 	rule.ID = id
 	rule.TenantID = h.tenantID(c)
 
-	// Auto-detect AI usage from Lua code
-	rule.UsesAI = detectUsesAI(rule.LuaCode)
+	// Accept uses_ai from frontend; it's a user-controlled setting now.
+	// The frontend sends the value explicitly.
 
 	// Validate Lua syntax
 	if err := h.Engine.ValidateLua(rule.LuaCode); err != nil {

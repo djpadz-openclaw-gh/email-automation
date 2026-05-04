@@ -31,9 +31,22 @@ func (e *Engine) SetKiroClient(client *KiroClient) {
 	e.kiroClient = client
 }
 
+// EvaluateOptions configures behavior for a single rule evaluation.
+type EvaluateOptions struct {
+	// AIEnabled controls whether kiro.* AI calls are allowed.
+	// When false, AI calls return false and log a warning.
+	AIEnabled bool
+}
+
 // Evaluate runs a single rule's Lua code against an email context.
 // Returns the rule result or an error if execution fails.
 func (e *Engine) Evaluate(rule *models.Rule, email *models.EmailContext) (*models.RuleResult, error) {
+	return e.EvaluateWithOptions(rule, email, nil)
+}
+
+// EvaluateWithOptions runs a single rule's Lua code against an email context with options.
+// Returns the rule result or an error if execution fails.
+func (e *Engine) EvaluateWithOptions(rule *models.Rule, email *models.EmailContext, opts *EvaluateOptions) (*models.RuleResult, error) {
 	L := lua.NewState(lua.Options{
 		SkipOpenLibs: true,
 	})
@@ -57,8 +70,19 @@ func (e *Engine) Evaluate(rule *models.Rule, email *models.EmailContext) (*model
 	// Register action functions
 	registerActions(L)
 
+	// Determine whether to enable AI for this evaluation
+	kiroClient := e.kiroClient
+	if opts != nil && !opts.AIEnabled && rule.UsesAI {
+		// AI is disabled for this user — pass nil client so kiro.* calls return false
+		log.Warn().
+			Str("rule", rule.Name).
+			Int64("rule_id", rule.ID).
+			Msg("AI disabled for user, skipping kiro.* calls in rule")
+		kiroClient = nil
+	}
+
 	// Register kiro namespace for semantic evaluation
-	registerKiroNamespace(L, e.kiroClient, email)
+	registerKiroNamespace(L, kiroClient, email)
 
 	// Execute the rule
 	if err := L.DoString(rule.LuaCode); err != nil {
@@ -73,9 +97,15 @@ func (e *Engine) Evaluate(rule *models.Rule, email *models.EmailContext) (*model
 // EvaluateAll runs all rules in priority order against an email.
 // Returns the first non-skip result, or skip if no rules match.
 func (e *Engine) EvaluateAll(rules []models.Rule, email *models.EmailContext) (*models.RuleResult, *models.Rule, error) {
+	return e.EvaluateAllWithOptions(rules, email, nil)
+}
+
+// EvaluateAllWithOptions runs all rules in priority order against an email with options.
+// Returns the first non-skip result, or skip if no rules match.
+func (e *Engine) EvaluateAllWithOptions(rules []models.Rule, email *models.EmailContext, opts *EvaluateOptions) (*models.RuleResult, *models.Rule, error) {
 	for i := range rules {
 		rule := &rules[i]
-		result, err := e.Evaluate(rule, email)
+		result, err := e.EvaluateWithOptions(rule, email, opts)
 		if err != nil {
 			log.Warn().Err(err).Str("rule", rule.Name).Msg("rule evaluation failed")
 			continue

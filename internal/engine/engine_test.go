@@ -726,7 +726,7 @@ return skip()
 
 func TestEngineKiroNamespace_WithClient(t *testing.T) {
 	// With a kiro client (but no real API key), functions should still not panic
-	kiroClient := NewKiroClient("", "")
+	kiroClient := NewKiroClient("", "", "", "")
 	eng := NewWithKiro(kiroClient)
 	rule := &models.Rule{
 		Name: "test-kiro-with-client",

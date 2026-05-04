@@ -47,15 +47,20 @@ function setCache(key: string, result: string): void {
  * Uses the dedicated /api/kiro/translate/english-to-lua endpoint on the Go backend,
  * which has proper system prompts and response validation built in.
  */
-export async function naturalLanguageToLua(description: string): Promise<string> {
-  const cacheKey = getCacheKey('nl2lua', description);
+export async function naturalLanguageToLua(description: string, usesAi?: boolean): Promise<string> {
+  const cacheKey = getCacheKey('nl2lua', `${description}:ai=${usesAi}`);
   const cached = getCached(cacheKey);
   if (cached) return cached;
+
+  const body: Record<string, unknown> = { description };
+  if (usesAi !== undefined) {
+    body.uses_ai = usesAi;
+  }
 
   const res = await fetch(`${TRANSLATE_BASE}/english-to-lua`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ description }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -84,15 +89,20 @@ export async function naturalLanguageToLua(description: string): Promise<string>
  * Uses the dedicated /api/kiro/translate/lua-to-english endpoint on the Go backend,
  * which returns a plain English description without any looksLikeLua validation.
  */
-export async function luaToNaturalLanguage(luaCode: string): Promise<string> {
-  const cacheKey = getCacheKey('lua2nl', luaCode);
+export async function luaToNaturalLanguage(luaCode: string, usesAi?: boolean): Promise<string> {
+  const cacheKey = getCacheKey('lua2nl', `${luaCode}:ai=${usesAi}`);
   const cached = getCached(cacheKey);
   if (cached) return cached;
+
+  const body: Record<string, unknown> = { lua_code: luaCode };
+  if (usesAi !== undefined) {
+    body.uses_ai = usesAi;
+  }
 
   const res = await fetch(`${TRANSLATE_BASE}/lua-to-english`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ lua_code: luaCode }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {

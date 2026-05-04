@@ -39,6 +39,10 @@ spec:
               value: "info"
             - name: LOG_JSON
               value: "true"
+            - name: KIRO_TEXT_MODEL
+              value: "claude-haiku-4.5"
+            - name: KIRO_VISION_MODEL
+              value: "claude-haiku-4.5"
             - name: REGISTRATION_ENABLED
               value: "true"
             - name: WEBAUTHN_RP_ID

@@ -30,8 +30,10 @@ type Consumer struct {
 	executor *imapactions.Executor
 	notifier *notifier.Telegram
 
-	consumeCtx jetstream.ConsumeContext
-	stopCh     chan struct{}
+	iter   jetstream.MessagesContext
+	cancel context.CancelFunc
+	stopCh chan struct{}
+	doneCh chan struct{}
 }
 
 // New creates a new rules engine consumer.
@@ -43,42 +45,104 @@ func New(database *db.DB, eng *engine.Engine, bus *natsbus.Bus, telegram *notifi
 		executor: imapactions.New(database, telegram),
 		notifier: telegram,
 		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
 	}
 }
 
 // Start begins consuming messages from the email.incoming stream.
 func (c *Consumer) Start(ctx context.Context) error {
-	// Create durable consumer with queue group for horizontal scaling
+	// Create durable consumer with deliver group for horizontal scaling across pods
 	consumer, err := c.bus.CreateOrUpdateConsumer(ctx, natsbus.StreamIncoming, jetstream.ConsumerConfig{
-		Durable:       natsbus.ConsumerRulesEngine,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       2 * time.Minute, // Allow time for Kiro API calls + IMAP actions
-		MaxDeliver:    3,               // Retry up to 3 times
-		FilterSubject: "email.incoming.>",
+		Durable:        natsbus.ConsumerRulesEngine,
+		DeliverPolicy:  jetstream.DeliverAllPolicy, // Start from the beginning of the stream
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		AckWait:        2 * time.Minute, // Allow time for Kiro API calls + IMAP actions
+		MaxDeliver:     3,               // Retry up to 3 times
+		MaxAckPending:  256,             // Limit in-flight messages per consumer
+		FilterSubject:  "email.incoming.>",
 	})
 	if err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
 
-	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		c.handleMessage(ctx, msg)
-	})
+	// Use Messages() pull-based iterator instead of Consume() push callback.
+	// Messages() gives explicit control over the fetch loop and is more resilient
+	// to silent stalls that can occur with Consume() after draining the initial backlog.
+	iter, err := consumer.Messages(
+		jetstream.PullMaxMessages(50),
+		jetstream.PullHeartbeat(5*time.Second),
+	)
 	if err != nil {
-		return fmt.Errorf("start consuming: %w", err)
+		return fmt.Errorf("start messages iterator: %w", err)
 	}
+	c.iter = iter
 
-	c.consumeCtx = consumeCtx
+	// Create a cancellable context for the processing loop
+	loopCtx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+
+	// Start the message processing loop in a goroutine
+	go c.processLoop(loopCtx, iter)
+
 	log.Info().Msg("rules engine consumer started")
 	return nil
 }
 
+// processLoop continuously pulls and processes messages from the iterator.
+func (c *Consumer) processLoop(ctx context.Context, iter jetstream.MessagesContext) {
+	defer close(c.doneCh)
+
+	log.Info().Msg("rules engine process loop started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("rules engine process loop stopping (context cancelled)")
+			return
+		case <-c.stopCh:
+			log.Info().Msg("rules engine process loop stopping (stop signal)")
+			return
+		default:
+		}
+
+		msg, err := iter.Next()
+		if err != nil {
+			if err == jetstream.ErrMsgIteratorClosed {
+				log.Info().Msg("message iterator closed, stopping process loop")
+				return
+			}
+			log.Error().Err(err).Msg("error fetching next message, retrying in 1s")
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				continue
+			}
+		}
+
+		c.handleMessage(ctx, msg)
+	}
+}
+
 // Stop gracefully shuts down the consumer.
 func (c *Consumer) Stop() {
-	if c.consumeCtx != nil {
-		c.consumeCtx.Drain()
+	// Stop the iterator first to unblock any pending Next() call
+	if c.iter != nil {
+		c.iter.Stop()
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	close(c.stopCh)
+	// Wait for the process loop to finish (with timeout)
+	select {
+	case <-c.doneCh:
+	case <-time.After(30 * time.Second):
+		log.Warn().Msg("rules engine process loop did not stop within 30s")
 	}
 	c.executor.Close()
-	close(c.stopCh)
 }
 
 // handleMessage processes a single incoming email event.
@@ -122,8 +186,25 @@ func (c *Consumer) handleMessage(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	// Evaluate all rules
-	result, matchedRule, err := c.engine.EvaluateAll(rules, emailCtx)
+	// Check if the tenant's user has AI enabled
+	aiEnabled := true
+	userID, err := c.db.GetUserIDByTenantID(ctx, event.TenantID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to get user for tenant, defaulting AI to enabled")
+	} else {
+		aiEnabled, err = c.db.GetUserAIEnabled(ctx, userID)
+		if err != nil {
+			logger.Warn().Err(err).Int64("user_id", userID).Msg("failed to check user AI permission, defaulting to enabled")
+			aiEnabled = true
+		}
+		if !aiEnabled {
+			logger.Info().Int64("user_id", userID).Msg("AI disabled for user, kiro.* calls will be skipped")
+		}
+	}
+
+	// Evaluate all rules with AI permission context
+	opts := &engine.EvaluateOptions{AIEnabled: aiEnabled}
+	result, matchedRule, err := c.engine.EvaluateAllWithOptions(rules, emailCtx, opts)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to evaluate rules")
 		_ = msg.Nak()

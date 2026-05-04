@@ -53,8 +53,10 @@ type Config struct {
 	WebAuthnRPOrigins     []string
 
 	// Kiro API
-	KiroAPIKey string
-	KiroAPIURL string
+	KiroAPIKey     string
+	KiroAPIURL     string
+	KiroTextModel  string
+	KiroVisionModel string
 
 	// Encryption
 	EncryptionMasterKey        string
@@ -94,6 +96,8 @@ func Load() *Config {
 		RateLimitMaxFails: envInt("RATE_LIMIT_MAX_FAILS", 10),
 		KiroAPIKey:          envStr("KIRO_API_KEY", ""),
 		KiroAPIURL:          envStr("KIRO_API_URL", "https://api.anthropic.com/v1/messages"),
+		KiroTextModel:       envStr("KIRO_TEXT_MODEL", "claude-haiku-4.5"),
+		KiroVisionModel:     envStr("KIRO_VISION_MODEL", "claude-haiku-4.5"),
 		EncryptionMasterKey:        envStr("ENCRYPTION_MASTER_KEY", ""),
 		EncryptionMasterKeyVersion: envInt("ENCRYPTION_MASTER_KEY_VERSION", 1),
 		EncryptionPreviousKeys:     parsePreviousKeys(),
