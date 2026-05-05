@@ -180,6 +180,17 @@ func (s *Server) setupRoutes() {
 	v1.Post("/accounts", accountH.CreateAccount)
 	v1.Put("/accounts/:id", accountH.UpdateAccount)
 	v1.Delete("/accounts/:id", accountH.DeleteAccount)
+
+	// OAuth2
+	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)
+	v1.Get("/oauth2/providers", oauth2H.ListProviders)
+	v1.Get("/oauth2/connect/:provider", oauth2H.Connect)
+	v1.Post("/oauth2/refresh/:id", oauth2H.RefreshToken)
+	v1.Post("/oauth2/disconnect/:id", oauth2H.Disconnect)
+
+	// OAuth2 callback (no JWT auth required - user is redirected here from provider)
+	// Registered outside /api/v1 to avoid JWT middleware
+	s.app.Get("/api/oauth2/callback/:provider", oauth2H.Callback)
 }
 
 // Start begins listening on the configured address.

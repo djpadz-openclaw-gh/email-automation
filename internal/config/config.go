@@ -67,6 +67,14 @@ type Config struct {
 	RateLimitWindow   time.Duration
 	RateLimitMaxFails int
 
+	// OAuth2
+	OAuth2Microsoft365ClientID     string
+	OAuth2Microsoft365ClientSecret string
+	OAuth2Microsoft365TenantID     string
+	OAuth2GmailClientID            string
+	OAuth2GmailClientSecret        string
+	OAuth2RedirectBaseURL          string
+
 	// Logging
 	LogLevel string
 	LogJSON  bool
@@ -102,6 +110,12 @@ func Load() *Config {
 		EncryptionMasterKeyVersion: envInt("ENCRYPTION_MASTER_KEY_VERSION", 1),
 		EncryptionPreviousKeys:     parsePreviousKeys(),
 		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
+		OAuth2Microsoft365ClientID:     envStr("OAUTH2_MS365_CLIENT_ID", ""),
+		OAuth2Microsoft365ClientSecret: envStr("OAUTH2_MS365_CLIENT_SECRET", ""),
+		OAuth2Microsoft365TenantID:     envStr("OAUTH2_MS365_TENANT_ID", ""),
+		OAuth2GmailClientID:            envStr("OAUTH2_GMAIL_CLIENT_ID", ""),
+		OAuth2GmailClientSecret:        envStr("OAUTH2_GMAIL_CLIENT_SECRET", ""),
+		OAuth2RedirectBaseURL:          envStr("OAUTH2_REDIRECT_BASE_URL", ""),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		LogJSON:           envBool("LOG_JSON", true),
 	}

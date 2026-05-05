@@ -205,10 +205,10 @@ func (db *DB) CreateAccount(ctx context.Context, a *models.Account) error {
 	// Actually, we can insert with plaintext first, get the ID, then encrypt+update.
 	// Better: insert with placeholder, get ID, encrypt, update.
 	err := db.Pool.QueryRow(ctx,
-		`INSERT INTO accounts (tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`INSERT INTO accounts (tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, oauth_refresh_token, oauth_token_expiry, oauth_provider, active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id, created_at, updated_at`,
-		a.TenantID, a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.Active,
+		a.TenantID, a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, a.Password, a.OAuthToken, a.OAuthRefreshToken, a.OAuthTokenExpiry, a.OAuthProvider, a.Active,
 	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return err
@@ -226,15 +226,39 @@ func (db *DB) CreateAccount(ctx context.Context, a *models.Account) error {
 			return fmt.Errorf("update encrypted password: %w", err)
 		}
 	}
+
+	// Encrypt OAuth tokens
+	if db.Encryptor != nil {
+		var needsUpdate bool
+		updates := make(map[string]string)
+		if a.OAuthToken != "" {
+			if enc, encErr := db.encryptPassword(a.OAuthToken, a.ID); encErr == nil {
+				updates["oauth_token"] = enc
+				needsUpdate = true
+			}
+		}
+		if a.OAuthRefreshToken != "" {
+			if enc, encErr := db.encryptPassword(a.OAuthRefreshToken, a.ID); encErr == nil {
+				updates["oauth_refresh_token"] = enc
+				needsUpdate = true
+			}
+		}
+		if needsUpdate {
+			for col, val := range updates {
+				_, _ = db.Pool.Exec(ctx,
+					fmt.Sprintf(`UPDATE accounts SET %s = $1 WHERE id = $2`, col), val, a.ID)
+			}
+		}
+	}
 	return nil
 }
 
 func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Account, error) {
 	a := &models.Account{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active, last_sync_at, created_at, updated_at
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, oauth_refresh_token, oauth_token_expiry, oauth_provider, active, last_sync_at, created_at, updated_at
 		 FROM accounts WHERE id = $1 AND tenant_id = $2`, id, tenantID,
-	).Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt)
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.OAuthRefreshToken, &a.OAuthTokenExpiry, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +266,19 @@ func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Accou
 	if decrypted, decErr := db.decryptPassword(a.Password, a.ID); decErr == nil {
 		a.Password = decrypted
 	}
+	// Decrypt OAuth tokens
+	if decrypted, decErr := db.decryptPassword(a.OAuthToken, a.ID); decErr == nil {
+		a.OAuthToken = decrypted
+	}
+	if decrypted, decErr := db.decryptPassword(a.OAuthRefreshToken, a.ID); decErr == nil {
+		a.OAuthRefreshToken = decrypted
+	}
 	return a, nil
 }
 
 func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Account, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, active, last_sync_at, created_at, updated_at
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, oauth_provider, active, last_sync_at, created_at, updated_at
 		 FROM accounts WHERE tenant_id = $1 ORDER BY id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -257,7 +288,7 @@ func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Accoun
 	var accounts []models.Account
 	for rows.Next() {
 		var a models.Account
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, a)
@@ -267,7 +298,7 @@ func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Accoun
 
 func (db *DB) ListActiveAccounts(ctx context.Context) ([]models.Account, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, active, last_sync_at, created_at, updated_at
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, oauth_refresh_token, oauth_token_expiry, oauth_provider, active, last_sync_at, created_at, updated_at
 		 FROM accounts WHERE active = true ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -277,12 +308,19 @@ func (db *DB) ListActiveAccounts(ctx context.Context) ([]models.Account, error) 
 	var accounts []models.Account
 	for rows.Next() {
 		var a models.Account
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.OAuthRefreshToken, &a.OAuthTokenExpiry, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		// Decrypt password
 		if decrypted, decErr := db.decryptPassword(a.Password, a.ID); decErr == nil {
 			a.Password = decrypted
+		}
+		// Decrypt OAuth tokens
+		if decrypted, decErr := db.decryptPassword(a.OAuthToken, a.ID); decErr == nil {
+			a.OAuthToken = decrypted
+		}
+		if decrypted, decErr := db.decryptPassword(a.OAuthRefreshToken, a.ID); decErr == nil {
+			a.OAuthRefreshToken = decrypted
 		}
 		accounts = append(accounts, a)
 	}
@@ -295,15 +333,50 @@ func (db *DB) UpdateAccount(ctx context.Context, a *models.Account) error {
 	if encrypted, err := db.encryptPassword(a.Password, a.ID); err == nil {
 		password = encrypted
 	}
+	// Encrypt OAuth tokens
+	oauthToken := a.OAuthToken
+	if db.Encryptor != nil && a.OAuthToken != "" {
+		if encrypted, err := db.encryptPassword(a.OAuthToken, a.ID); err == nil {
+			oauthToken = encrypted
+		}
+	}
+	oauthRefreshToken := a.OAuthRefreshToken
+	if db.Encryptor != nil && a.OAuthRefreshToken != "" {
+		if encrypted, err := db.encryptPassword(a.OAuthRefreshToken, a.ID); err == nil {
+			oauthRefreshToken = encrypted
+		}
+	}
 	_, err := db.Pool.Exec(ctx,
-		`UPDATE accounts SET name=$1, email=$2, provider=$3, imap_host=$4, imap_port=$5, imap_tls=$6, username=$7, password=$8, oauth_token=$9, active=$10, updated_at=NOW()
-		 WHERE id=$11 AND tenant_id=$12`,
-		a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, password, a.OAuthToken, a.Active, a.ID, a.TenantID)
+		`UPDATE accounts SET name=$1, email=$2, provider=$3, imap_host=$4, imap_port=$5, imap_tls=$6, username=$7, password=$8, oauth_token=$9, oauth_refresh_token=$10, oauth_token_expiry=$11, oauth_provider=$12, active=$13, updated_at=NOW()
+		 WHERE id=$14 AND tenant_id=$15`,
+		a.Name, a.Email, a.Provider, a.IMAPHost, a.IMAPPort, a.IMAPTLS, a.Username, password, oauthToken, oauthRefreshToken, a.OAuthTokenExpiry, a.OAuthProvider, a.Active, a.ID, a.TenantID)
 	return err
 }
 
 func (db *DB) DeleteAccount(ctx context.Context, tenantID, id int64) error {
 	_, err := db.Pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	return err
+}
+
+// UpdateAccountOAuthTokens updates only the OAuth2 tokens for an account.
+// Used during token refresh to avoid overwriting other fields.
+func (db *DB) UpdateAccountOAuthTokens(ctx context.Context, accountID int64, accessToken, refreshToken string, expiry *time.Time) error {
+	// Encrypt tokens
+	encAccessToken := accessToken
+	if db.Encryptor != nil && accessToken != "" {
+		if encrypted, err := db.encryptPassword(accessToken, accountID); err == nil {
+			encAccessToken = encrypted
+		}
+	}
+	encRefreshToken := refreshToken
+	if db.Encryptor != nil && refreshToken != "" {
+		if encrypted, err := db.encryptPassword(refreshToken, accountID); err == nil {
+			encRefreshToken = encrypted
+		}
+	}
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE accounts SET oauth_token=$1, oauth_refresh_token=$2, oauth_token_expiry=$3, updated_at=NOW() WHERE id=$4`,
+		encAccessToken, encRefreshToken, expiry, accountID)
 	return err
 }
 

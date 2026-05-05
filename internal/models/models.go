@@ -16,21 +16,24 @@ type Tenant struct {
 
 // Account represents an email account belonging to a tenant.
 type Account struct {
-	ID           int64     `json:"id"`
-	TenantID     int64     `json:"tenant_id"`
-	Name         string    `json:"name"`
-	Email        string    `json:"email"`
-	Provider     string    `json:"provider"` // imap, graph, mapi
-	IMAPHost     string    `json:"imap_host,omitempty"`
-	IMAPPort     int       `json:"imap_port,omitempty"`
-	IMAPTLS      bool      `json:"imap_tls"`
-	Username     string    `json:"username,omitempty"`
-	Password     string    `json:"password,omitempty"`
-	OAuthToken   string    `json:"oauth_token,omitempty"`
-	Active       bool      `json:"active"`
-	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                int64      `json:"id"`
+	TenantID          int64      `json:"tenant_id"`
+	Name              string     `json:"name"`
+	Email             string     `json:"email"`
+	Provider          string     `json:"provider"` // imap, graph, mapi
+	IMAPHost          string     `json:"imap_host,omitempty"`
+	IMAPPort          int        `json:"imap_port,omitempty"`
+	IMAPTLS           bool       `json:"imap_tls"`
+	Username          string     `json:"username,omitempty"`
+	Password          string     `json:"password,omitempty"`
+	OAuthToken        string     `json:"oauth_token,omitempty"`
+	OAuthRefreshToken string     `json:"oauth_refresh_token,omitempty"`
+	OAuthTokenExpiry  *time.Time `json:"oauth_token_expiry,omitempty"`
+	OAuthProvider     string     `json:"oauth_provider,omitempty"` // microsoft365, gmail
+	Active            bool       `json:"active"`
+	LastSyncAt        *time.Time `json:"last_sync_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // Rule represents a Lua rule associated with a tenant.

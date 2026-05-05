@@ -17,6 +17,7 @@ import (
 	"github.com/djpadz/email-automation/internal/movedetect"
 	natsbus "github.com/djpadz/email-automation/internal/nats"
 	"github.com/djpadz/email-automation/internal/notifier"
+	"github.com/djpadz/email-automation/internal/oauth2"
 )
 
 func main() {
@@ -75,6 +76,30 @@ func main() {
 
 	// Start IMAP listener
 	listener := imaplistener.New(database, bus, cfg.IMAPIdleTimeout, cfg.IMAPPollInterval)
+
+	// Configure OAuth2 providers for token refresh
+	oauthProviders := make(map[string]oauth2.Provider)
+	if cfg.OAuth2Microsoft365ClientID != "" && cfg.OAuth2Microsoft365ClientSecret != "" {
+		redirectURI := cfg.OAuth2RedirectBaseURL + "/api/oauth2/callback/microsoft365"
+		oauthProviders["microsoft365"] = oauth2.NewMicrosoft365Provider(
+			cfg.OAuth2Microsoft365ClientID,
+			cfg.OAuth2Microsoft365ClientSecret,
+			cfg.OAuth2Microsoft365TenantID,
+			redirectURI,
+		)
+		log.Info().Msg("OAuth2: Microsoft 365 provider configured for IMAP listener")
+	}
+	if cfg.OAuth2GmailClientID != "" && cfg.OAuth2GmailClientSecret != "" {
+		redirectURI := cfg.OAuth2RedirectBaseURL + "/api/oauth2/callback/gmail"
+		oauthProviders["gmail"] = oauth2.NewGmailProvider(
+			cfg.OAuth2GmailClientID,
+			cfg.OAuth2GmailClientSecret,
+			redirectURI,
+		)
+		log.Info().Msg("OAuth2: Gmail provider configured for IMAP listener")
+	}
+	listener.SetOAuthProviders(oauthProviders)
+
 	if err := listener.Start(ctx); err != nil {
 		log.Fatal().Err(err).Msg("failed to start IMAP listener")
 	}

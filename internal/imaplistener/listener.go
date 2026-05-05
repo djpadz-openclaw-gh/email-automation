@@ -22,6 +22,7 @@ import (
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/models"
 	natsbus "github.com/djpadz/email-automation/internal/nats"
+	"github.com/djpadz/email-automation/internal/oauth2"
 )
 
 // Listener manages IMAP connections for all active accounts and publishes
@@ -33,6 +34,9 @@ type Listener struct {
 	idleTimeout  time.Duration
 	pollInterval time.Duration
 
+	// OAuth2 providers for token refresh
+	oauthProviders map[string]oauth2.Provider
+
 	workers map[int64]*worker
 	mu      sync.RWMutex
 	stopCh  chan struct{}
@@ -41,13 +45,19 @@ type Listener struct {
 // New creates a new IMAP listener.
 func New(database *db.DB, bus *natsbus.Bus, idleTimeout, pollInterval time.Duration) *Listener {
 	return &Listener{
-		db:           database,
-		bus:          bus,
-		idleTimeout:  idleTimeout,
-		pollInterval: pollInterval,
-		workers:      make(map[int64]*worker),
-		stopCh:       make(chan struct{}),
+		db:             database,
+		bus:            bus,
+		idleTimeout:    idleTimeout,
+		pollInterval:   pollInterval,
+		oauthProviders: make(map[string]oauth2.Provider),
+		workers:        make(map[int64]*worker),
+		stopCh:         make(chan struct{}),
 	}
+}
+
+// SetOAuthProviders sets the OAuth2 providers for token refresh.
+func (l *Listener) SetOAuthProviders(providers map[string]oauth2.Provider) {
+	l.oauthProviders = providers
 }
 
 // Start begins the listener, spawning workers for all active accounts.
@@ -103,7 +113,7 @@ func (l *Listener) refreshWorkers(ctx context.Context) error {
 	for _, acc := range accounts {
 		activeIDs[acc.ID] = true
 		if _, exists := l.workers[acc.ID]; !exists {
-			w := newWorker(acc, l.db, l.bus, l.idleTimeout, l.pollInterval)
+			w := newWorker(acc, l.db, l.bus, l.idleTimeout, l.pollInterval, l.oauthProviders)
 			l.workers[acc.ID] = w
 			go w.run(ctx)
 			log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("started IMAP listener worker")
@@ -123,15 +133,16 @@ func (l *Listener) refreshWorkers(ctx context.Context) error {
 
 // worker monitors a single IMAP account and publishes new messages to JetStream.
 type worker struct {
-	account      models.Account
-	db           *db.DB
-	bus          *natsbus.Bus
-	idleTimeout  time.Duration
-	pollInterval time.Duration
-	stopCh       chan struct{}
-	client       *imapclient.Client
-	clientMu     sync.Mutex
-	mailboxCh    chan struct{} // signaled by UnilateralDataHandler on new mail
+	account        models.Account
+	db             *db.DB
+	bus            *natsbus.Bus
+	idleTimeout    time.Duration
+	pollInterval   time.Duration
+	oauthProviders map[string]oauth2.Provider
+	stopCh         chan struct{}
+	client         *imapclient.Client
+	clientMu       sync.Mutex
+	mailboxCh      chan struct{} // signaled by UnilateralDataHandler on new mail
 
 	// IDLE-based move detection
 	expungeCh chan uint32   // receives sequence numbers from EXPUNGE notifications
@@ -139,16 +150,17 @@ type worker struct {
 	uidsMu    sync.Mutex   // protects inboxUIDs
 }
 
-func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTimeout, pollInterval time.Duration) *worker {
+func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTimeout, pollInterval time.Duration, oauthProviders map[string]oauth2.Provider) *worker {
 	return &worker{
-		account:      account,
-		db:           database,
-		bus:          bus,
-		idleTimeout:  idleTimeout,
-		pollInterval: pollInterval,
-		stopCh:       make(chan struct{}),
-		mailboxCh:    make(chan struct{}, 1),
-		expungeCh:    make(chan uint32, 64),
+		account:        account,
+		db:             database,
+		bus:            bus,
+		idleTimeout:    idleTimeout,
+		pollInterval:   pollInterval,
+		oauthProviders: oauthProviders,
+		stopCh:         make(chan struct{}),
+		mailboxCh:      make(chan struct{}, 1),
+		expungeCh:      make(chan uint32, 64),
 	}
 }
 
@@ -405,15 +417,91 @@ func (w *worker) connect() (*imapclient.Client, error) {
 		username = w.account.Email
 	}
 
-	loginCmd := client.Login(username, w.account.Password)
-	if err := loginCmd.Wait(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("login to %s: %w", addr, err)
+	// Authenticate: use XOAUTH2 for OAuth2 accounts, plain login otherwise
+	if w.account.OAuthProvider != "" && w.account.OAuthToken != "" {
+		// Refresh token if expired
+		if oauth2.IsTokenExpired(w.account.OAuthTokenExpiry) {
+			if err := w.refreshOAuthToken(); err != nil {
+				client.Close()
+				return nil, fmt.Errorf("refresh OAuth2 token: %w", err)
+			}
+		}
+
+		// Build XOAUTH2 SASL client and authenticate
+		xoauth2Client := &oauth2.XOAuth2Client{
+			Username: username,
+			Token:    w.account.OAuthToken,
+		}
+		if err := client.Authenticate(xoauth2Client); err != nil {
+			// Token might have just expired, try one refresh
+			log.Warn().Err(err).Int64("account_id", w.account.ID).Msg("XOAUTH2 auth failed, attempting token refresh")
+			if refreshErr := w.refreshOAuthToken(); refreshErr != nil {
+				client.Close()
+				return nil, fmt.Errorf("XOAUTH2 auth failed and refresh failed: auth=%w, refresh=%v", err, refreshErr)
+			}
+			// Reconnect with new token
+			client.Close()
+			return nil, fmt.Errorf("XOAUTH2 auth failed, token refreshed, will reconnect: %w", err)
+		}
+		log.Info().Int64("account_id", w.account.ID).Str("addr", addr).Msg("IMAP XOAUTH2 login successful")
+	} else {
+		loginCmd := client.Login(username, w.account.Password)
+		if err := loginCmd.Wait(); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("login to %s: %w", addr, err)
+		}
+		log.Info().Int64("account_id", w.account.ID).Str("addr", addr).Msg("IMAP login successful")
 	}
 
-	log.Info().Int64("account_id", w.account.ID).Str("addr", addr).Msg("IMAP login successful")
 	w.client = client
 	return client, nil
+}
+
+// refreshOAuthToken refreshes the OAuth2 access token using the refresh token.
+func (w *worker) refreshOAuthToken() error {
+	provider, ok := w.oauthProviders[w.account.OAuthProvider]
+	if !ok {
+		return fmt.Errorf("OAuth2 provider %s not configured", w.account.OAuthProvider)
+	}
+
+	if w.account.OAuthRefreshToken == "" {
+		return fmt.Errorf("no refresh token available for account %d", w.account.ID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tokenResp, err := provider.RefreshToken(ctx, w.account.OAuthRefreshToken)
+	if err != nil {
+		return fmt.Errorf("refresh token: %w", err)
+	}
+
+	expiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+	// Update in-memory account
+	w.account.OAuthToken = tokenResp.AccessToken
+	w.account.OAuthTokenExpiry = &expiry
+	if tokenResp.RefreshToken != "" {
+		w.account.OAuthRefreshToken = tokenResp.RefreshToken
+	}
+
+	// Persist to database
+	refreshToken := tokenResp.RefreshToken
+	if refreshToken == "" {
+		refreshToken = w.account.OAuthRefreshToken
+	}
+	if err := w.db.UpdateAccountOAuthTokens(ctx, w.account.ID, tokenResp.AccessToken, refreshToken, &expiry); err != nil {
+		log.Error().Err(err).Int64("account_id", w.account.ID).Msg("failed to persist refreshed OAuth2 tokens")
+		// Don't return error - we have the token in memory and can still use it
+	}
+
+	log.Info().
+		Int64("account_id", w.account.ID).
+		Str("provider", w.account.OAuthProvider).
+		Time("expiry", expiry).
+		Msg("OAuth2 token refreshed")
+
+	return nil
 }
 
 func (w *worker) disconnect() {
