@@ -460,7 +460,7 @@ func (db *DB) GetPendingDeferredActions(ctx context.Context) ([]models.DeferredA
 	rows, err := db.Pool.Query(ctx,
 		`SELECT id, rule_id, account_id, message_id, action, target, execute_at, created_at
 		 FROM deferred_actions
-		 WHERE executed = false AND execute_at <= NOW()
+		 WHERE status = 'pending' AND execute_at <= NOW()
 		 ORDER BY execute_at`)
 	if err != nil {
 		return nil, err
@@ -479,8 +479,12 @@ func (db *DB) GetPendingDeferredActions(ctx context.Context) ([]models.DeferredA
 }
 
 func (db *DB) MarkDeferredActionDone(ctx context.Context, id int64, errMsg string) error {
+	status := "executed"
+	if errMsg != "" {
+		status = "failed"
+	}
 	_, err := db.Pool.Exec(ctx,
-		`UPDATE deferred_actions SET executed = true, error = $2 WHERE id = $1`, id, errMsg)
+		`UPDATE deferred_actions SET executed = true, status = $2, executed_at = NOW(), error = $3 WHERE id = $1`, id, status, errMsg)
 	return err
 }
 
@@ -490,7 +494,7 @@ func (db *DB) ListDeferredActions(ctx context.Context, tenantID int64) ([]models
 		`SELECT d.id, d.rule_id, d.account_id, d.message_id, d.action, d.target, d.execute_at, d.executed, d.error, d.created_at
 		 FROM deferred_actions d
 		 JOIN accounts a ON a.id = d.account_id
-		 WHERE a.tenant_id = $1 AND d.executed = false
+		 WHERE a.tenant_id = $1 AND d.status = 'pending'
 		 ORDER BY d.execute_at ASC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -513,7 +517,7 @@ func (db *DB) CancelDeferredAction(ctx context.Context, tenantID int64, actionID
 	tag, err := db.Pool.Exec(ctx,
 		`DELETE FROM deferred_actions d
 		 USING accounts a
-		 WHERE d.id = $1 AND d.account_id = a.id AND a.tenant_id = $2 AND d.executed = false`,
+		 WHERE d.id = $1 AND d.account_id = a.id AND a.tenant_id = $2 AND d.status = 'pending'`,
 		actionID, tenantID)
 	if err != nil {
 		return err

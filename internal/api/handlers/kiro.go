@@ -75,8 +75,12 @@ Action functions (call one to set result):
 - archive(reason) — archive the email
 - delete(reason) — delete the email
 - notify(message, reason) — send a notification
+- flag(flag_name, reason) — set an IMAP flag
 - move_after(folder, delay_secs, reason) — move after a delay
 - delete_after(delay_secs, reason) — delete after a delay
+- schedule(delay_secs, function) — schedule any action to execute after a delay
+  The function should call exactly one action (move, delete, archive, etc.)
+  Example: schedule(3 * 60 * 60, function() move("@Archive") end)
 
 Helper functions:
 - contains(haystack, needle) — case-insensitive substring match
@@ -244,6 +248,41 @@ end
 
 return skip()
 ` + "```" + `
+
+Example 7 - Scheduled action with delay:
+` + "```lua" + `
+-- Rule: Archive newsletters after 3 hours
+-- Keep newsletter emails for 3 hours, then move to @Archive.
+
+local sender = email.sender_address:lower()
+if not contains_any(sender, {"newsletter", "digest", "weekly"}) then return skip() end
+
+schedule(3 * 60 * 60, function()
+    move("@Archive")
+end)
+` + "```" + `
+
+Example 8 - Delete after delay:
+` + "```lua" + `
+-- Rule: Auto-delete promotional emails after 24 hours
+-- Delete promotional emails after 1 day.
+
+local subject = email.subject:lower()
+if not contains_any(subject, {"sale", "% off", "limited time", "unsubscribe"}) then return skip() end
+
+schedule(24 * 60 * 60, function()
+    delete()
+end)
+` + "```" + `
+
+When the user mentions time-based conditions like "after X hours", "in Y days", "after Z minutes",
+generate schedule() calls:
+- "move to @Archive after 3 hours" → schedule(3 * 60 * 60, function() move("@Archive") end)
+- "delete after 1 day" → schedule(24 * 60 * 60, function() delete() end)
+- "archive in 30 minutes" → schedule(30 * 60, function() archive() end)
+- "flag as important after 2 hours" → schedule(2 * 60 * 60, function() flag("important") end)
+
+Prefer schedule() over move_after()/delete_after() as it's more flexible and readable.
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
 

@@ -347,6 +347,55 @@ func registerHelpers(L *lua.LState) {
 
 // registerActions adds action functions that rules call to set their result.
 func registerActions(L *lua.LState) {
+	// schedule(delay_seconds, function) - schedule an action to execute after a delay.
+	// The function is executed in capture mode: any action called inside it
+	// (move, delete, archive, etc.) is intercepted and stored as a deferred action
+	// rather than executed immediately.
+	L.SetGlobal("schedule", L.NewFunction(func(L *lua.LState) int {
+		delay := L.CheckInt(1)
+		fn := L.CheckFunction(2)
+
+		// Enter capture mode: set a flag so action functions know to capture
+		L.SetGlobal("__schedule_capture", lua.LTrue)
+		L.SetGlobal("__schedule_delay", lua.LNumber(delay))
+
+		// Reset captured action
+		L.SetGlobal("__captured_action", lua.LNil)
+		L.SetGlobal("__captured_target", lua.LNil)
+
+		// Call the function - it will call an action function which will
+		// detect capture mode and store the action instead of setting __result
+		if err := L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}); err != nil {
+			L.RaiseError("schedule: error in scheduled function: %s", err.Error())
+			return 0
+		}
+
+		// Exit capture mode
+		L.SetGlobal("__schedule_capture", lua.LFalse)
+
+		// Read captured action
+		capturedAction := L.GetGlobal("__captured_action")
+		capturedTarget := L.GetGlobal("__captured_target")
+
+		if capturedAction == lua.LNil || capturedAction.String() == "" {
+			L.RaiseError("schedule: no action was called inside the scheduled function")
+			return 0
+		}
+
+		action := capturedAction.String()
+		target := ""
+		if capturedTarget != lua.LNil {
+			target = capturedTarget.String()
+		}
+
+		// Set the result as a deferred action
+		setResult(L, "defer", target, delay, fmt.Sprintf("scheduled %s", action))
+		resultTbl := L.GetGlobal("__result").(*lua.LTable)
+		resultTbl.RawSetString("deferred_action", lua.LString(action))
+
+		return 0
+	}))
+
 	// skip() - rule doesn't apply
 	L.SetGlobal("skip", L.NewFunction(func(L *lua.LState) int {
 		setResult(L, "skip", "", 0, "")
@@ -355,6 +404,12 @@ func registerActions(L *lua.LState) {
 
 	// delete(reason?) - delete the message
 	L.SetGlobal("delete", L.NewFunction(func(L *lua.LState) int {
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("delete"))
+			L.SetGlobal("__captured_target", lua.LString(""))
+			return 0
+		}
 		reason := L.OptString(1, "")
 		setResult(L, "delete", "", 0, reason)
 		return 0
@@ -362,6 +417,12 @@ func registerActions(L *lua.LState) {
 
 	// archive(reason?) - archive the message
 	L.SetGlobal("archive", L.NewFunction(func(L *lua.LState) int {
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("archive"))
+			L.SetGlobal("__captured_target", lua.LString(""))
+			return 0
+		}
 		reason := L.OptString(1, "")
 		setResult(L, "archive", "", 0, reason)
 		return 0
@@ -370,6 +431,12 @@ func registerActions(L *lua.LState) {
 	// move(folder, reason?) - move to a specific folder
 	L.SetGlobal("move", L.NewFunction(func(L *lua.LState) int {
 		folder := L.CheckString(1)
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("move"))
+			L.SetGlobal("__captured_target", lua.LString(folder))
+			return 0
+		}
 		reason := L.OptString(2, "")
 		setResult(L, "move", folder, 0, reason)
 		return 0
@@ -377,6 +444,12 @@ func registerActions(L *lua.LState) {
 
 	// keep(reason?) - explicitly keep, stop rule chain
 	L.SetGlobal("keep", L.NewFunction(func(L *lua.LState) int {
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("keep"))
+			L.SetGlobal("__captured_target", lua.LString(""))
+			return 0
+		}
 		reason := L.OptString(1, "")
 		setResult(L, "keep", "", 0, reason)
 		return 0
@@ -385,6 +458,12 @@ func registerActions(L *lua.LState) {
 	// notify(message, reason?) - send a notification
 	L.SetGlobal("notify", L.NewFunction(func(L *lua.LState) int {
 		message := L.CheckString(1)
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("notify"))
+			L.SetGlobal("__captured_target", lua.LString(message))
+			return 0
+		}
 		reason := L.OptString(2, "")
 		setResult(L, "notify", message, 0, reason)
 		return 0
@@ -427,6 +506,12 @@ func registerActions(L *lua.LState) {
 	// flag(flag_name, reason?) - set an IMAP flag on the message
 	L.SetGlobal("flag", L.NewFunction(func(L *lua.LState) int {
 		flagName := L.CheckString(1)
+		// Check if we're in schedule capture mode
+		if L.GetGlobal("__schedule_capture") == lua.LTrue {
+			L.SetGlobal("__captured_action", lua.LString("flag"))
+			L.SetGlobal("__captured_target", lua.LString(flagName))
+			return 0
+		}
 		reason := L.OptString(2, "")
 		setResult(L, "flag", flagName, 0, reason)
 		return 0
