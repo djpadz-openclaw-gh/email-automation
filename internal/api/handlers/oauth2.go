@@ -202,7 +202,7 @@ func (h *OAuth2Handlers) Callback(c *fiber.Ctx) error {
 		TenantID:          stateData.TenantID,
 		Name:              fmt.Sprintf("%s (%s)", email, providerName),
 		Email:             email,
-		Provider:          "imap",
+		Provider:          providerName,
 		IMAPHost:          provider.IMAPHost(),
 		IMAPPort:          provider.IMAPPort(),
 		IMAPTLS:           true,
