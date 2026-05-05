@@ -358,7 +358,7 @@ export default function AccountList() {
             </>
           )}
         </div>
-      )}}
+      )}
 
       {/* Account list */}
       {accounts.length === 0 ? (
