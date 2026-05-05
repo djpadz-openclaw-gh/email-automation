@@ -148,10 +148,12 @@ export default function AccountList() {
     setEditingAccount(account);
     setFormName(account.name);
     setFormEmail(account.email);
-    setFormHost(account.imap_host);
-    setFormPort(account.imap_port);
-    setFormTLS(account.imap_tls);
-    setFormUsername(account.username || '');
+    if (account.provider === 'imap') {
+      setFormHost(account.imap_host);
+      setFormPort(account.imap_port);
+      setFormTLS(account.imap_tls);
+      setFormUsername(account.username || '');
+    }
     setFormPassword('');
     setShowForm(true);
     setError('');
@@ -263,10 +265,53 @@ export default function AccountList() {
       {/* Add account form */}
       {showForm && (
         <div className="mb-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
-            {editingAccount ? `Edit: ${editingAccount.name}` : 'New IMAP Account'}
-          </h3>
-          <div className="grid grid-cols-2 gap-4">
+          {/* OAuth Account Edit Form */}
+          {editingAccount && editingAccount.provider !== 'imap' ? (
+            <>
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
+                Edit: {editingAccount.name}
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Account Type
+                  </label>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    {editingAccount.provider === 'gmail' ? 'Gmail (OAuth)' : 'Microsoft 365 (OAuth)'}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Email
+                  </label>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">{editingAccount.email}</p>
+                </div>
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-sm text-blue-700 dark:text-blue-400">
+                  To update your authentication, click the reauthenticate button below.
+                </div>
+              </div>
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => handleOAuthConnect(editingAccount.provider)}
+                  disabled={oauthLoading !== null}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {oauthLoading === editingAccount.provider ? 'Reauthenticating...' : '🔄 Reauthenticate'}
+                </button>
+                <button
+                  onClick={() => { setShowForm(false); resetForm(); }}
+                  className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
+                {editingAccount ? `Edit: ${editingAccount.name}` : 'New IMAP Account'}
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
             <div>
               <label htmlFor="acc-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
               <input id="acc-name" type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Personal" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
@@ -301,17 +346,19 @@ export default function AccountList() {
               </label>
               <input id="acc-pass" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} placeholder={editingAccount ? '••••••••' : ''} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
             </div>
-          </div>
-          <div className="flex gap-3 mt-4">
-            <button onClick={handleSave} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
-              {formSaving ? (editingAccount ? 'Updating...' : 'Creating...') : (editingAccount ? 'Update Account' : 'Create Account')}
-            </button>
-            <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-              Cancel
-            </button>
-          </div>
+              </div>
+              <div className="flex gap-3 mt-4">
+                <button onClick={handleSave} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                  {formSaving ? (editingAccount ? 'Updating...' : 'Creating...') : (editingAccount ? 'Update Account' : 'Create Account')}
+                </button>
+                <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
         </div>
-      )}
+      )}}
 
       {/* Account list */}
       {accounts.length === 0 ? (
