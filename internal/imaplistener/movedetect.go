@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -368,8 +369,8 @@ func (w *worker) recordInboxMessageLocations(ctx context.Context, client *imapcl
 				MessageUID: fmt.Sprintf("%d", buf.UID),
 				Folder:     "INBOX",
 				MessageID:  buf.Envelope.MessageID,
-				Sender:     senderAddr,
-				Subject:    buf.Envelope.Subject,
+				Sender:     sanitizeUTF8(senderAddr),
+				Subject:    sanitizeUTF8(buf.Envelope.Subject),
 			}
 			if err := w.db.UpsertMessageLocation(ctx, loc); err != nil {
 				logger.Warn().Err(err).Str("message_id", buf.Envelope.MessageID).Msg("failed to record message location")
@@ -385,4 +386,25 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// sanitizeUTF8 removes invalid UTF-8 sequences from a string
+// to prevent PostgreSQL encoding errors.
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	// Replace invalid bytes with the Unicode replacement character
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune('\uFFFD')
+			i++
+		} else {
+			b.WriteRune(r)
+			i += size
+		}
+	}
+	return b.String()
 }

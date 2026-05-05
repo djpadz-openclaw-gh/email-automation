@@ -15,6 +15,7 @@ var trashFolders = map[string]bool{
 	"spam":              true,
 	"junk e-mail":       true,
 	"bulk mail":         true,
+	"@30daytrash":       true,
 }
 
 // isTrashFolder returns true if the folder name matches a known
@@ -29,6 +30,10 @@ func isTrashFolder(folder string) bool {
 		return true
 	}
 	if strings.HasPrefix(lower, "[gmail]/spam") {
+		return true
+	}
+	// Check for "trash" anywhere in the name
+	if strings.Contains(lower, "trash") {
 		return true
 	}
 	return false
