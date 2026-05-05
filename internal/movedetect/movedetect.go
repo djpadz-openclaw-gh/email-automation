@@ -19,6 +19,7 @@ import (
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/models"
 	"github.com/djpadz/email-automation/internal/notifier"
+	"github.com/djpadz/email-automation/internal/oauth2"
 )
 
 // skipFolderAttrs are IMAP special-use attributes that indicate system folders
@@ -88,21 +89,28 @@ type Detector struct {
 	db       *db.DB
 	notifier *notifier.Telegram
 
-	pollInterval time.Duration
-	workers      map[int64]*moveWorker
-	mu           sync.RWMutex
-	stopCh       chan struct{}
+	pollInterval   time.Duration
+	oauthProviders map[string]oauth2.Provider
+	workers        map[int64]*moveWorker
+	mu             sync.RWMutex
+	stopCh         chan struct{}
 }
 
 // New creates a new move detector.
 func New(database *db.DB, telegram *notifier.Telegram, pollInterval time.Duration) *Detector {
 	return &Detector{
-		db:           database,
-		notifier:     telegram,
-		pollInterval: pollInterval,
-		workers:      make(map[int64]*moveWorker),
-		stopCh:       make(chan struct{}),
+		db:             database,
+		notifier:       telegram,
+		pollInterval:   pollInterval,
+		oauthProviders: make(map[string]oauth2.Provider),
+		workers:        make(map[int64]*moveWorker),
+		stopCh:         make(chan struct{}),
 	}
+}
+
+// SetOAuthProviders sets the OAuth2 providers for token refresh.
+func (d *Detector) SetOAuthProviders(providers map[string]oauth2.Provider) {
+	d.oauthProviders = providers
 }
 
 // Start begins the move detector, spawning workers for all active accounts.
@@ -156,12 +164,20 @@ func (d *Detector) refreshWorkers(ctx context.Context) error {
 	activeIDs := make(map[int64]bool)
 	for _, acc := range accounts {
 		activeIDs[acc.ID] = true
-		if _, exists := d.workers[acc.ID]; !exists {
-			w := newMoveWorker(acc, d.db, d.notifier, d.pollInterval)
-			d.workers[acc.ID] = w
-			go w.run(ctx)
-			log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("started move detector worker")
+		if w, exists := d.workers[acc.ID]; exists {
+			// Check if credentials changed — restart worker if so
+			if moveCredentialsChanged(w.account, acc) {
+				log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("move detector: credentials changed, restarting worker")
+				w.stop()
+				delete(d.workers, acc.ID)
+			} else {
+				continue
+			}
 		}
+		w := newMoveWorker(acc, d.db, d.notifier, d.pollInterval, d.oauthProviders)
+		d.workers[acc.ID] = w
+		go w.run(ctx)
+		log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("started move detector worker")
 	}
 
 	for id, w := range d.workers {
@@ -174,13 +190,32 @@ func (d *Detector) refreshWorkers(ctx context.Context) error {
 	return nil
 }
 
+// moveCredentialsChanged returns true if the account's authentication credentials
+// differ between the cached worker copy and the freshly-loaded database copy.
+func moveCredentialsChanged(cached, fresh models.Account) bool {
+	if cached.Password != fresh.Password {
+		return true
+	}
+	if cached.OAuthRefreshToken != fresh.OAuthRefreshToken {
+		return true
+	}
+	if cached.Username != fresh.Username {
+		return true
+	}
+	if cached.IMAPHost != fresh.IMAPHost || cached.IMAPPort != fresh.IMAPPort {
+		return true
+	}
+	return false
+}
+
 // moveWorker monitors a single IMAP account for message moves.
 type moveWorker struct {
-	account      models.Account
-	db           *db.DB
-	notifier     *notifier.Telegram
-	pollInterval time.Duration
-	stopCh       chan struct{}
+	account        models.Account
+	db             *db.DB
+	notifier       *notifier.Telegram
+	oauthProviders map[string]oauth2.Provider
+	pollInterval   time.Duration
+	stopCh         chan struct{}
 
 	// inboxUIDs tracks UIDs currently in INBOX with their metadata
 	inboxUIDs map[imap.UID]*messageInfo
@@ -197,14 +232,15 @@ type messageInfo struct {
 	Subject   string
 }
 
-func newMoveWorker(account models.Account, database *db.DB, telegram *notifier.Telegram, pollInterval time.Duration) *moveWorker {
+func newMoveWorker(account models.Account, database *db.DB, telegram *notifier.Telegram, pollInterval time.Duration, oauthProviders map[string]oauth2.Provider) *moveWorker {
 	return &moveWorker{
-		account:      account,
-		db:           database,
-		notifier:     telegram,
-		pollInterval: pollInterval,
-		stopCh:       make(chan struct{}),
-		inboxUIDs:    make(map[imap.UID]*messageInfo),
+		account:        account,
+		db:             database,
+		notifier:       telegram,
+		oauthProviders: oauthProviders,
+		pollInterval:   pollInterval,
+		stopCh:         make(chan struct{}),
+		inboxUIDs:      make(map[imap.UID]*messageInfo),
 	}
 }
 
@@ -645,13 +681,80 @@ func (w *moveWorker) connect() (*imapclient.Client, error) {
 		username = w.account.Email
 	}
 
-	loginCmd := client.Login(username, w.account.Password)
-	if err := loginCmd.Wait(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("login to %s: %w", addr, err)
+	// Authenticate: use XOAUTH2 for OAuth2 accounts, plain login otherwise
+	if w.account.OAuthProvider != "" && w.account.OAuthToken != "" {
+		// Refresh token if expired
+		if oauth2.IsTokenExpired(w.account.OAuthTokenExpiry) {
+			if err := w.refreshOAuthToken(); err != nil {
+				client.Close()
+				return nil, fmt.Errorf("refresh OAuth2 token: %w", err)
+			}
+		}
+
+		xoauth2Client := &oauth2.XOAuth2Client{
+			Username: username,
+			Token:    w.account.OAuthToken,
+		}
+		if err := client.Authenticate(xoauth2Client); err != nil {
+			// Token might have just expired, try one refresh
+			log.Warn().Err(err).Int64("account_id", w.account.ID).Msg("move detector XOAUTH2 auth failed, attempting token refresh")
+			if refreshErr := w.refreshOAuthToken(); refreshErr != nil {
+				client.Close()
+				return nil, fmt.Errorf("XOAUTH2 auth failed and refresh failed: auth=%w, refresh=%v", err, refreshErr)
+			}
+			client.Close()
+			return nil, fmt.Errorf("XOAUTH2 auth failed, token refreshed, will reconnect: %w", err)
+		}
+		log.Info().Int64("account_id", w.account.ID).Str("addr", addr).Msg("move detector XOAUTH2 login successful")
+	} else {
+		loginCmd := client.Login(username, w.account.Password)
+		if err := loginCmd.Wait(); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("login to %s: %w", addr, err)
+		}
 	}
 
 	return client, nil
+}
+
+// refreshOAuthToken refreshes the OAuth2 access token using the refresh token.
+func (w *moveWorker) refreshOAuthToken() error {
+	provider, ok := w.oauthProviders[w.account.OAuthProvider]
+	if !ok {
+		return fmt.Errorf("OAuth2 provider %s not configured", w.account.OAuthProvider)
+	}
+
+	if w.account.OAuthRefreshToken == "" {
+		return fmt.Errorf("no refresh token available for account %d", w.account.ID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tokenResp, err := provider.RefreshToken(ctx, w.account.OAuthRefreshToken)
+	if err != nil {
+		return fmt.Errorf("refresh token: %w", err)
+	}
+
+	expiry := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+	// Update in-memory account
+	w.account.OAuthToken = tokenResp.AccessToken
+	w.account.OAuthTokenExpiry = &expiry
+	if tokenResp.RefreshToken != "" {
+		w.account.OAuthRefreshToken = tokenResp.RefreshToken
+	}
+
+	// Persist to database
+	refreshToken := tokenResp.RefreshToken
+	if refreshToken == "" {
+		refreshToken = w.account.OAuthRefreshToken
+	}
+	if err := w.db.UpdateAccountOAuthTokens(ctx, w.account.ID, tokenResp.AccessToken, refreshToken, &expiry); err != nil {
+		log.Error().Err(err).Int64("account_id", w.account.ID).Msg("move detector: failed to persist refreshed OAuth2 tokens")
+	}
+
+	return nil
 }
 
 // --- Helpers ---

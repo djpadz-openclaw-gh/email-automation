@@ -115,6 +115,7 @@ func main() {
 		moveDetectInterval = 2 * time.Minute
 	}
 	detector := movedetect.New(database, telegram, moveDetectInterval)
+	detector.SetOAuthProviders(oauthProviders)
 	if err := detector.Start(ctx); err != nil {
 		log.Fatal().Err(err).Msg("failed to start move detector")
 	}
