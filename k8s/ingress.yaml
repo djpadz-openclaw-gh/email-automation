@@ -19,7 +19,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: email.padz.net
+    - host: email-automation.oc.ctb.padz.net
       http:
         paths:
           # API routes
