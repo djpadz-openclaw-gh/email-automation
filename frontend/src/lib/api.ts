@@ -429,6 +429,23 @@ class ApiClient {
     });
   }
 
+  // --- OAuth2 ---
+  async listOAuthProviders(): Promise<{ providers: { name: string }[] }> {
+    return this.request<{ providers: { name: string }[] }>('/api/v1/oauth2/providers');
+  }
+
+  async oauthConnect(provider: string): Promise<{ auth_url: string; state: string }> {
+    return this.request<{ auth_url: string; state: string }>(`/api/v1/oauth2/connect/${encodeURIComponent(provider)}`);
+  }
+
+  async oauthRefreshToken(accountId: number): Promise<{ message: string; expires_at: string; expires_in: number }> {
+    return this.request(`/api/v1/oauth2/refresh/${accountId}`, { method: 'POST' });
+  }
+
+  async oauthDisconnect(accountId: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/oauth2/disconnect/${accountId}`, { method: 'POST' });
+  }
+
   // --- Accounts ---
   async listAccounts(): Promise<Account[]> {
     return this.request<Account[]>('/api/v1/accounts');

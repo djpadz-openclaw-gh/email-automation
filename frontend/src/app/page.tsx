@@ -38,6 +38,12 @@ export default function Home() {
       handleLogout();
     });
 
+    // If returning from OAuth flow, switch to accounts tab
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('oauth_success') || params.has('oauth_error')) {
+      setActiveTab('accounts');
+    }
+
     // Fetch config to check if registration is enabled
     api.getConfig().then(config => {
       setRegistrationEnabled(config.registration_enabled);
