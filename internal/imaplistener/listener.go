@@ -132,6 +132,11 @@ type worker struct {
 	client       *imapclient.Client
 	clientMu     sync.Mutex
 	mailboxCh    chan struct{} // signaled by UnilateralDataHandler on new mail
+
+	// IDLE-based move detection
+	expungeCh chan uint32   // receives sequence numbers from EXPUNGE notifications
+	inboxUIDs []imap.UID   // current INBOX UIDs ordered by sequence number
+	uidsMu    sync.Mutex   // protects inboxUIDs
 }
 
 func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTimeout, pollInterval time.Duration) *worker {
@@ -143,6 +148,7 @@ func newWorker(account models.Account, database *db.DB, bus *natsbus.Bus, idleTi
 		pollInterval: pollInterval,
 		stopCh:       make(chan struct{}),
 		mailboxCh:    make(chan struct{}, 1),
+		expungeCh:    make(chan uint32, 64),
 	}
 }
 
@@ -184,8 +190,7 @@ func (w *worker) run(ctx context.Context) {
 }
 
 // idleLoop connects, does an initial poll, then enters IMAP IDLE to wait
-// for real-time notifications of new messages. It returns on error or
-// when the worker is stopped.
+// for real-time notifications of new messages and EXPUNGE events for move detection.
 func (w *worker) idleLoop(ctx context.Context) error {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
@@ -203,8 +208,16 @@ func (w *worker) idleLoop(ctx context.Context) error {
 		return fmt.Errorf("select INBOX: %w", err)
 	}
 
-	// Initial poll for any unseen messages
-	if err := w.pollUnseen(ctx, client); err != nil {
+	// Build UID tracking list for EXPUNGE→UID mapping
+	if err := w.buildUIDMap(ctx, client); err != nil {
+		logger.Warn().Err(err).Msg("failed to build UID map, move detection may not work")
+	}
+
+	// Drain any stale expunge notifications
+	w.drainExpungeChannel()
+
+	// Initial poll for new messages (UID > last_uid_processed)
+	if err := w.pollNewMessages(ctx, client); err != nil {
 		return fmt.Errorf("initial poll: %w", err)
 	}
 
@@ -234,36 +247,73 @@ func (w *worker) idleLoop(ctx context.Context) error {
 
 		logger.Debug().Msg("IDLE started, waiting for server notifications")
 
-		// Wait for: new mail notification, idle timeout, or stop signal
+		// Collect EXPUNGE notifications during IDLE
+		var expungedSeqNums []uint32
+		timer := time.NewTimer(w.idleTimeout)
+
 		var idleInterrupted bool
-		select {
-		case <-w.mailboxCh:
-			logger.Debug().Msg("new mail notification received during IDLE")
-			idleInterrupted = true
-		case <-time.After(w.idleTimeout):
-			logger.Debug().Msg("IDLE timeout reached, will re-poll")
-			idleInterrupted = true
-		case <-ctx.Done():
-			idleCmd.Close()
-			return ctx.Err()
-		case <-w.stopCh:
-			idleCmd.Close()
-			return nil
+	idle_loop:
+		for {
+			select {
+			case <-w.mailboxCh:
+				logger.Debug().Msg("mailbox notification received during IDLE")
+				idleInterrupted = true
+				// Give a short window to collect rapid-fire notifications
+				timer.Reset(2 * time.Second)
+			case seqNum := <-w.expungeCh:
+				logger.Info().Uint32("seq_num", seqNum).Msg("EXPUNGE received during IDLE")
+				expungedSeqNums = append(expungedSeqNums, seqNum)
+				idleInterrupted = true
+				// Give a short window to collect multiple rapid expunges
+				timer.Reset(2 * time.Second)
+			case <-timer.C:
+				if !idleInterrupted {
+					logger.Debug().Msg("IDLE timeout reached, will re-poll")
+				}
+				break idle_loop
+			case <-ctx.Done():
+				timer.Stop()
+				idleCmd.Close()
+				return ctx.Err()
+			case <-w.stopCh:
+				timer.Stop()
+				idleCmd.Close()
+				return nil
+			}
 		}
+		timer.Stop()
 
 		// Stop IDLE so we can issue commands
-		if idleInterrupted {
-			if err := idleCmd.Close(); err != nil {
-				return fmt.Errorf("close IDLE: %w", err)
-			}
-			if err := idleCmd.Wait(); err != nil {
-				return fmt.Errorf("wait IDLE: %w", err)
+		if err := idleCmd.Close(); err != nil {
+			return fmt.Errorf("close IDLE: %w", err)
+		}
+		if err := idleCmd.Wait(); err != nil {
+			return fmt.Errorf("wait IDLE: %w", err)
+		}
+
+		// Handle EXPUNGE-based move detection
+		if len(expungedSeqNums) > 0 {
+			expungedUIDs := w.mapSeqNumsToUIDs(expungedSeqNums)
+			if len(expungedUIDs) > 0 {
+				if err := w.handleExpungedMessages(ctx, client, expungedUIDs); err != nil {
+					logger.Warn().Err(err).Msg("failed to handle expunged messages")
+				}
+				// Re-select INBOX after searching other folders
+				reselectCmd := client.Select("INBOX", nil)
+				if _, err := reselectCmd.Wait(); err != nil {
+					return fmt.Errorf("re-select INBOX after move detection: %w", err)
+				}
 			}
 		}
 
 		// Poll for new messages
-		if err := w.pollUnseen(ctx, client); err != nil {
+		if err := w.pollNewMessages(ctx, client); err != nil {
 			return fmt.Errorf("poll after IDLE: %w", err)
+		}
+
+		// Rebuild UID map after changes
+		if err := w.buildUIDMap(ctx, client); err != nil {
+			logger.Warn().Err(err).Msg("failed to rebuild UID map")
 		}
 	}
 }
@@ -287,7 +337,7 @@ func (w *worker) connect() (*imapclient.Client, error) {
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
-	// Set up unilateral data handler to receive new-mail notifications during IDLE
+	// Set up unilateral data handler to receive new-mail and EXPUNGE notifications during IDLE
 	opts := &imapclient.Options{
 		TLSConfig: &tls.Config{
 			ServerName: host,
@@ -310,8 +360,17 @@ func (w *worker) connect() (*imapclient.Client, error) {
 				log.Debug().
 					Int64("account_id", w.account.ID).
 					Uint32("seq_num", seqNum).
-					Msg("expunge notification received")
-				// Signal to re-check state
+					Msg("EXPUNGE notification received")
+				// Send to expunge channel for move detection
+				select {
+				case w.expungeCh <- seqNum:
+				default:
+					log.Warn().
+						Int64("account_id", w.account.ID).
+						Uint32("seq_num", seqNum).
+						Msg("expunge channel full, dropping notification")
+				}
+				// Also signal mailbox change
 				select {
 				case w.mailboxCh <- struct{}{}:
 				default:
@@ -369,37 +428,51 @@ func (w *worker) disconnect() {
 	}
 }
 
-// pollUnseen searches for unseen messages on an already-selected mailbox
-// and publishes them to JetStream.
-func (w *worker) pollUnseen(ctx context.Context, client *imapclient.Client) error {
+// pollNewMessages searches for messages with UID > last_uid_processed
+// and publishes them to JetStream. This replaces the unseen-flag approach.
+func (w *worker) pollNewMessages(ctx context.Context, client *imapclient.Client) error {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
 		Str("email", w.account.Email).
 		Logger()
 
-	logger.Debug().Msg("polling for unseen messages")
+	logger.Debug().Msg("polling for new messages (UID-based)")
 
-	criteria := &imap.SearchCriteria{
-		NotFlag: []imap.Flag{imap.FlagSeen},
+	// Get last processed UID from database
+	lastUID, err := w.db.GetLastUIDProcessed(ctx, w.account.ID)
+	if err != nil {
+		return fmt.Errorf("get last UID processed: %w", err)
 	}
+
+	// Search for messages with UID > lastUID
+	// We search all UIDs and filter client-side for compatibility
+	criteria := &imap.SearchCriteria{}
 	searchCmd := client.UIDSearch(criteria, nil)
 	searchData, err := searchCmd.Wait()
 	if err != nil {
-		return fmt.Errorf("search unseen: %w", err)
+		return fmt.Errorf("search UIDs: %w", err)
 	}
 
-	uids := searchData.AllUIDs()
+	// Filter to only UIDs greater than lastUID
+	var uids []imap.UID
+	for _, uid := range searchData.AllUIDs() {
+		if uint32(uid) > lastUID {
+			uids = append(uids, uid)
+		}
+	}
 	if len(uids) == 0 {
-		logger.Debug().Msg("no unseen messages")
+		logger.Debug().Uint32("last_uid", lastUID).Msg("no new messages")
 		if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
 			logger.Warn().Err(err).Msg("failed to update sync time")
 		}
 		return nil
 	}
 
-	logger.Info().Int("count", len(uids)).Msg("found unseen messages")
+	logger.Info().Int("count", len(uids)).Uint32("last_uid", lastUID).Msg("found new messages")
 
+	// Process in batches
 	batchSize := 50
+	var maxUID imap.UID
 	for i := 0; i < len(uids); i += batchSize {
 		end := i + batchSize
 		if end > len(uids) {
@@ -410,10 +483,22 @@ func (w *worker) pollUnseen(ctx context.Context, client *imapclient.Client) erro
 		if err := w.publishBatch(ctx, client, batch); err != nil {
 			logger.Error().Err(err).Int("batch_start", i).Msg("batch publish failed")
 		}
+
+		// Track max UID in this batch
+		for _, uid := range batch {
+			if uid > maxUID {
+				maxUID = uid
+			}
+		}
 	}
 
-	if err := w.db.UpdateAccountSyncTime(ctx, w.account.ID); err != nil {
-		logger.Warn().Err(err).Msg("failed to update sync time")
+	// Update last_uid_processed to the max UID we just processed
+	if maxUID > 0 {
+		if err := w.db.UpdateLastUIDProcessed(ctx, w.account.ID, uint32(maxUID)); err != nil {
+			logger.Warn().Err(err).Uint32("max_uid", uint32(maxUID)).Msg("failed to update last UID processed")
+		} else {
+			logger.Info().Uint32("max_uid", uint32(maxUID)).Msg("updated last UID processed")
+		}
 	}
 
 	return nil

@@ -31,6 +31,39 @@ var skipFolders = map[string]bool{
 	"[Gmail]/Drafts":    true,
 }
 
+// trashOrJunkFolders are folders that should NOT trigger rule creation
+// when a message is moved to them.
+var trashOrJunkFolders = map[string]bool{
+	"trash":              true,
+	"deleted messages":   true,
+	"deleted items":      true,
+	"[gmail]/trash":      true,
+	"[gmail]/all mail":   true,
+	"[gmail]/spam":       true,
+	"junk":              true,
+	"spam":              true,
+	"junk e-mail":       true,
+	"bulk mail":         true,
+	"archive":           true,
+}
+
+// isTrashOrJunkFolder returns true if the folder name matches a known
+// trash/junk/spam/archive folder that should not trigger rule creation.
+func isTrashOrJunkFolder(folder string) bool {
+	lower := strings.ToLower(folder)
+	if trashOrJunkFolders[lower] {
+		return true
+	}
+	// Also check prefixes for Gmail-style folders
+	if strings.HasPrefix(lower, "[gmail]/trash") {
+		return true
+	}
+	if strings.HasPrefix(lower, "[gmail]/spam") {
+		return true
+	}
+	return false
+}
+
 // Detector monitors IMAP accounts for message moves between folders.
 type Detector struct {
 	db       *db.DB
@@ -265,6 +298,15 @@ func (w *moveWorker) scan(ctx context.Context) error {
 			logger.Debug().
 				Str("message_id", info.MessageID).
 				Msg("message disappeared from INBOX (likely deleted)")
+			continue
+		}
+
+		// Skip rule creation if destination is a trash/junk/spam folder
+		if isTrashOrJunkFolder(destFolder) {
+			logger.Info().
+				Str("message_id", info.MessageID).
+				Str("destination", destFolder).
+				Msg("message moved to trash/junk folder, skipping rule creation")
 			continue
 		}
 

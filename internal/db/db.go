@@ -312,6 +312,26 @@ func (db *DB) UpdateAccountSyncTime(ctx context.Context, accountID int64) error 
 	return err
 }
 
+// GetLastUIDProcessed returns the last UID processed for an account.
+func (db *DB) GetLastUIDProcessed(ctx context.Context, accountID int64) (uint32, error) {
+	var uid int64
+	err := db.Pool.QueryRow(ctx,
+		`SELECT COALESCE(last_uid_processed, 0) FROM accounts WHERE id = $1`, accountID,
+	).Scan(&uid)
+	if err != nil {
+		return 0, err
+	}
+	return uint32(uid), nil
+}
+
+// UpdateLastUIDProcessed sets the last UID processed for an account.
+func (db *DB) UpdateLastUIDProcessed(ctx context.Context, accountID int64, uid uint32) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE accounts SET last_uid_processed = $1, last_sync_at = NOW() WHERE id = $2`,
+		int64(uid), accountID)
+	return err
+}
+
 // --- Rule operations ---
 
 func (db *DB) CreateRule(ctx context.Context, r *models.Rule) error {
