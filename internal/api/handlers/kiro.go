@@ -286,19 +286,34 @@ Prefer schedule() over move_after()/delete_after() as it's more flexible and rea
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
 
-const luaToEnglishSystemPrompt = `You are an expert at reading Lua email filtering rules and explaining them in plain English.
+const luaToEnglishSystemPrompt = `You are an expert at reading Lua email filtering rules and describing their mechanics in plain English.
 
-Given a Lua email rule, describe what it does in clear, concise English. Focus on:
-1. What emails the rule matches (sender, subject, conditions)
-2. What action it takes (move, archive, delete, keep, flag, notify)
-3. Any timing conditions (e.g., "older than 24 hours")
-4. Any AI/semantic evaluation (kiro.classify or kiro.is_actionable calls)
+Given a Lua email rule, describe WHAT the code does — the literal logic flow and actions. Read like code comments: factual, mechanical, literal.
 
-Note: Rules may use kiro.classify(email, question) for AI-based semantic classification
-or kiro.is_actionable(email) to determine if an email requires action. When describing
-these, explain what semantic criteria the rule is checking.
+Rules:
+1. Describe the conditions checked (if/then/else, comparisons, function calls)
+2. Describe the actions taken (move, delete, keep, archive, flag, notify, schedule)
+3. Describe timing values literally (e.g., "if older than 3 hours", "schedules a move after 86400 seconds")
+4. For kiro.classify() calls, state the question being asked — do not interpret what it means
+5. Do NOT speculate about intent or purpose (no "probably because", "to clean up", "so that")
+6. Do NOT add interpretive sentences about why the rule exists
+7. Do NOT explain the reasoning behind conditions or actions
+8. Stick to the WHAT, never the WHY
 
-Be concise but complete. Write a single paragraph or a few short sentences. Do not include any code in your response.`
+Format: Write short, factual sentences describing the logic flow. Use "If... then..." structure to mirror the code's conditionals.
+
+Examples of GOOD output:
+- "If the sender domain is amazon.com and the subject contains 'your order' or 'has shipped', and the email is older than 24 hours, move it to @Amazon. Otherwise, keep it."
+- "If the email is less than 3 hours old, keep it. Otherwise, move it to @3DayTrash."
+- "If the sender address does not end with @mycompany.com, skip. Otherwise, call kiro.is_actionable(). If actionable, keep. If not, archive."
+- "Skip if no image attachments. Call kiro.classify() asking 'Does this email have an image containing McAfee or Geek Squad invoice text?'. If yes, move to Junk."
+
+Examples of BAD output (do NOT write like this):
+- "Keep Scripps appointment emails for 3 hours (probably because they need time to review), then move to trash (to clean up old messages)." ← speculates about reasons
+- "Archives newsletters to reduce inbox clutter." ← interprets purpose
+- "Moves old Amazon emails to keep the inbox tidy." ← adds intent
+
+Be concise but complete. Do not include any code in your response.`
 
 // anthropicRequest is the request body for the Anthropic Messages API.
 type anthropicRequest struct {
