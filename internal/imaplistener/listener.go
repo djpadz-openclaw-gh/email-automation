@@ -112,12 +112,20 @@ func (l *Listener) refreshWorkers(ctx context.Context) error {
 	activeIDs := make(map[int64]bool)
 	for _, acc := range accounts {
 		activeIDs[acc.ID] = true
-		if _, exists := l.workers[acc.ID]; !exists {
-			w := newWorker(acc, l.db, l.bus, l.idleTimeout, l.pollInterval, l.oauthProviders)
-			l.workers[acc.ID] = w
-			go w.run(ctx)
-			log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("started IMAP listener worker")
+		if w, exists := l.workers[acc.ID]; exists {
+			// Check if credentials changed — restart worker if so
+			if credentialsChanged(w.account, acc) {
+				log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("credentials changed, restarting worker")
+				w.stop()
+				delete(l.workers, acc.ID)
+			} else {
+				continue
+			}
 		}
+		w := newWorker(acc, l.db, l.bus, l.idleTimeout, l.pollInterval, l.oauthProviders)
+		l.workers[acc.ID] = w
+		go w.run(ctx)
+		log.Info().Int64("account_id", acc.ID).Str("email", acc.Email).Msg("started IMAP listener worker")
 	}
 
 	for id, w := range l.workers {
@@ -129,6 +137,24 @@ func (l *Listener) refreshWorkers(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// credentialsChanged returns true if the account's authentication credentials
+// differ between the cached worker copy and the freshly-loaded database copy.
+func credentialsChanged(cached, fresh models.Account) bool {
+	if cached.Password != fresh.Password {
+		return true
+	}
+	if cached.OAuthRefreshToken != fresh.OAuthRefreshToken {
+		return true
+	}
+	if cached.Username != fresh.Username {
+		return true
+	}
+	if cached.IMAPHost != fresh.IMAPHost || cached.IMAPPort != fresh.IMAPPort {
+		return true
+	}
+	return false
 }
 
 // worker monitors a single IMAP account and publishes new messages to JetStream.
