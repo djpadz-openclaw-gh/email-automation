@@ -759,7 +759,7 @@ func (w *worker) bufferToEvent(buf *imapclient.FetchMessageBuffer) *natsbus.Inco
 		TenantID:        w.account.TenantID,
 		MessageID:       env.MessageID,
 		UID:             uint32(buf.UID),
-		Subject:         env.Subject,
+		Subject:         strings.TrimSpace(env.Subject),
 		Sender:          senderAddr,
 		SenderName:      senderName,
 		Recipients:      recipients,

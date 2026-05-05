@@ -901,7 +901,7 @@ func (w *Worker) bufferToEmailContext(buf *imapclient.FetchMessageBuffer) *model
 
 	return &models.EmailContext{
 		MessageID:       env.MessageID,
-		Subject:         env.Subject,
+		Subject:         strings.TrimSpace(env.Subject),
 		SenderName:      senderName,
 		SenderAddress:   senderAddr,
 		Recipients:      recipients,

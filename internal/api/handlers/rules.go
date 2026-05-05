@@ -736,7 +736,7 @@ func fetchINBOXEmails(account *models.Account, limit int) ([]models.EmailContext
 
 		emails = append(emails, models.EmailContext{
 			MessageID:       env.MessageID,
-			Subject:         env.Subject,
+			Subject:         strings.TrimSpace(env.Subject),
 			SenderName:      senderName,
 			SenderAddress:   senderAddr,
 			Recipients:      recipients,
