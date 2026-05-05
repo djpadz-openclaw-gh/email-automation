@@ -69,7 +69,7 @@ func (l *Listener) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
