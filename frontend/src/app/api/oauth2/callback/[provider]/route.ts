@@ -82,7 +82,7 @@ function getCallbackPage(success: boolean, message: string) {
           } else {
             // Not a popup - redirect to home page with status in URL
             const param = ${success} ? 'oauth_success=1' : 'oauth_error=' + encodeURIComponent(${JSON.stringify(message)});
-            window.location.href = '/?\\' + param;
+            window.location.href = '/?' + param;
           }
         </script>
       </head>
