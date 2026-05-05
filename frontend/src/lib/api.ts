@@ -24,9 +24,19 @@ export interface Account {
   imap_tls: boolean;
   username: string;
   active: boolean;
+  oauth_provider?: string; // microsoft365, gmail
   last_sync_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface OAuth2Provider {
+  name: string;
+}
+
+export interface OAuth2ConnectResponse {
+  auth_url: string;
+  state: string;
 }
 
 export interface RuleResult {
@@ -387,6 +397,20 @@ class ApiClient {
 
   async deleteAccount(id: number): Promise<void> {
     await this.request(`/api/v1/accounts/${id}`, { method: 'DELETE' });
+  }
+
+  // --- OAuth2 ---
+  async listOAuth2Providers(): Promise<OAuth2Provider[]> {
+    const resp = await this.request<{ providers: OAuth2Provider[] }>('/api/v1/oauth2/providers');
+    return resp.providers || [];
+  }
+
+  async oauth2Connect(provider: string): Promise<OAuth2ConnectResponse> {
+    return this.request<OAuth2ConnectResponse>(`/api/v1/oauth2/connect/${provider}`);
+  }
+
+  async oauth2Disconnect(accountId: number): Promise<void> {
+    await this.request(`/api/v1/oauth2/disconnect/${accountId}`, { method: 'POST' });
   }
 
   // --- Logs ---
