@@ -129,23 +129,24 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 			Msg("looking for moved message in other folders")
 
 		// Search other folders for this message by Message-ID
-		destFolder := w.findMessageInFolders(client, loc.MessageID)
-		if destFolder == "" {
+		dest := w.findMessageInFolders(client, loc.MessageID)
+		if dest.Name == "" {
 			logger.Debug().
 				Str("message_id", loc.MessageID).
 				Msg("expunged message not found in other folders (likely deleted)")
 			continue
 		}
 
-		// Part 3: Check if destination is a trash/junk folder - skip rule creation
-		if isTrashFolder(destFolder) {
+		// Check if destination is a system trash/junk/archive folder by IMAP attributes
+		if isSkipFolder(dest.Name, dest.Attrs) {
 			logger.Info().
 				Str("message_id", loc.MessageID).
-				Str("destination", destFolder).
-				Msg("message moved to trash/junk folder, skipping rule creation")
+				Str("destination", dest.Name).
+				Msg("message moved to system trash/junk/archive folder (by attribute), skipping rule creation")
 			continue
 		}
 
+		destFolder := dest.Name
 		logger.Info().
 			Str("message_id", loc.MessageID).
 			Str("sender", loc.Sender).
@@ -188,17 +189,23 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 	return nil
 }
 
+// folderInfo holds a folder name and its IMAP attributes from the LIST response.
+type folderInfo struct {
+	Name  string
+	Attrs []imap.MailboxAttr
+}
+
 // findMessageInFolders searches other folders for a message by Message-ID.
-// Returns the folder name where found, or empty string if not found.
-func (w *worker) findMessageInFolders(client *imapclient.Client, messageID string) string {
+// Returns the folder info (name + attributes) where found, or empty result if not found.
+func (w *worker) findMessageInFolders(client *imapclient.Client, messageID string) folderInfo {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
 		Str("message_id", messageID).
 		Logger()
 
-	// List all folders
+	// List all folders with their attributes
 	listCmd := client.List("", "*", nil)
-	var folders []string
+	var folders []folderInfo
 	for {
 		data := listCmd.Next()
 		if data == nil {
@@ -219,22 +226,34 @@ func (w *worker) findMessageInFolders(client *imapclient.Client, messageID strin
 		if noSelect {
 			continue
 		}
-		// Skip Sent/Drafts folders
-		lower := strings.ToLower(name)
-		if lower == "drafts" || lower == "sent" || lower == "sent messages" || lower == "sent items" ||
-			lower == "[gmail]/sent mail" || lower == "[gmail]/drafts" {
+		// Skip Sent/Drafts folders (by IMAP attribute, with name fallback)
+		isSentOrDrafts := false
+		for _, attr := range data.Attrs {
+			if attr == imap.MailboxAttrSent || attr == imap.MailboxAttrDrafts {
+				isSentOrDrafts = true
+				break
+			}
+		}
+		if !isSentOrDrafts {
+			lower := strings.ToLower(name)
+			if lower == "drafts" || lower == "sent" || lower == "sent messages" || lower == "sent items" ||
+				lower == "[gmail]/sent mail" || lower == "[gmail]/drafts" {
+				isSentOrDrafts = true
+			}
+		}
+		if isSentOrDrafts {
 			continue
 		}
-		folders = append(folders, name)
+		folders = append(folders, folderInfo{Name: name, Attrs: data.Attrs})
 	}
 	if err := listCmd.Close(); err != nil {
 		logger.Warn().Err(err).Msg("failed to list folders")
-		return ""
+		return folderInfo{}
 	}
 
 	// Search for the message in each folder
 	for _, folder := range folders {
-		selectCmd := client.Select(folder, nil)
+		selectCmd := client.Select(folder.Name, nil)
 		mbox, err := selectCmd.Wait()
 		if err != nil {
 			continue
@@ -260,7 +279,7 @@ func (w *worker) findMessageInFolders(client *imapclient.Client, messageID strin
 		}
 	}
 
-	return ""
+	return folderInfo{}
 }
 
 // generateAndCreateRuleFromMove creates an auto-learned rule based on the move.

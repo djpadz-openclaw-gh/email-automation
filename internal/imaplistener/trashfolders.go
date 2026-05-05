@@ -1,40 +1,52 @@
 package imaplistener
 
-import "strings"
+import (
+	"strings"
 
-// trashFolders lists folder names that should NOT trigger rule creation
-// when a message is moved to them.
-var trashFolders = map[string]bool{
-	"trash":              true,
-	"deleted messages":   true,
-	"deleted items":      true,
-	"[gmail]/trash":      true,
-	"[gmail]/all mail":   true,
-	"[gmail]/spam":       true,
-	"junk":              true,
-	"spam":              true,
-	"junk e-mail":       true,
-	"bulk mail":         true,
-	"@30daytrash":       true,
+	"github.com/emersion/go-imap/v2"
+)
+
+// skipFolderAttrs are IMAP special-use attributes that indicate system folders
+// where moves should NOT trigger rule creation.
+var skipFolderAttrs = map[imap.MailboxAttr]bool{
+	imap.MailboxAttrTrash:   true, // \Trash
+	imap.MailboxAttrJunk:    true, // \Junk (spam)
+	imap.MailboxAttrAll:     true, // \All (Gmail's All Mail)
+	imap.MailboxAttrArchive: true, // \Archive
 }
 
-// isTrashFolder returns true if the folder name matches a known
-// trash/junk/spam folder that should not trigger rule creation.
-func isTrashFolder(folder string) bool {
-	lower := strings.ToLower(folder)
-	if trashFolders[lower] {
-		return true
+// systemTrashNames is a fallback list of exact folder names (case-insensitive)
+// that are known system trash/junk/spam folders. Used when the IMAP server
+// doesn't report special-use attributes (RFC 6154).
+// NOTE: Only exact matches — NOT substring matching. This ensures user-created
+// folders like @3DayTrash are not incorrectly filtered.
+var systemTrashNames = map[string]bool{
+	"trash":            true,
+	"deleted messages": true,
+	"deleted items":    true,
+	"[gmail]/trash":    true,
+	"[gmail]/all mail": true,
+	"[gmail]/spam":     true,
+	"junk":             true,
+	"spam":             true,
+	"junk e-mail":      true,
+	"bulk mail":        true,
+}
+
+// isSkipFolder returns true if the folder should not trigger rule creation.
+// It checks IMAP special-use attributes first (authoritative), then falls back
+// to exact name matching for servers that don't report attributes.
+// User-created folders like @3DayTrash will NOT match because we use exact
+// name comparison, not substring matching.
+func isSkipFolder(name string, attrs []imap.MailboxAttr) bool {
+	// First: check IMAP attributes (authoritative if present)
+	for _, attr := range attrs {
+		if skipFolderAttrs[attr] {
+			return true
+		}
 	}
-	// Also check if folder starts with common trash prefixes
-	if strings.HasPrefix(lower, "[gmail]/trash") {
-		return true
-	}
-	if strings.HasPrefix(lower, "[gmail]/spam") {
-		return true
-	}
-	// Check for "trash" anywhere in the name
-	if strings.Contains(lower, "trash") {
-		return true
-	}
-	return false
+
+	// Fallback: exact name match for well-known system folder names
+	lower := strings.ToLower(name)
+	return systemTrashNames[lower]
 }

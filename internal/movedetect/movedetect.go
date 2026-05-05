@@ -21,52 +21,66 @@ import (
 	"github.com/djpadz/email-automation/internal/notifier"
 )
 
-// skipFolders are folders we don't track for move detection.
-var skipFolders = map[string]bool{
-	"Drafts":         true,
-	"Sent":           true,
-	"Sent Messages":  true,
-	"Sent Items":     true,
-	"[Gmail]/Sent Mail": true,
-	"[Gmail]/Drafts":    true,
+// skipFolderAttrs are IMAP special-use attributes that indicate system folders
+// where moves should NOT trigger rule creation.
+var skipFolderAttrs = map[imap.MailboxAttr]bool{
+	imap.MailboxAttrTrash:   true, // \Trash
+	imap.MailboxAttrJunk:    true, // \Junk (spam)
+	imap.MailboxAttrAll:     true, // \All (Gmail's All Mail)
+	imap.MailboxAttrArchive: true, // \Archive
 }
 
-// trashOrJunkFolders are folders that should NOT trigger rule creation
-// when a message is moved to them.
-var trashOrJunkFolders = map[string]bool{
-	"trash":              true,
-	"deleted messages":   true,
-	"deleted items":      true,
-	"[gmail]/trash":      true,
-	"[gmail]/all mail":   true,
-	"[gmail]/spam":       true,
-	"junk":              true,
-	"spam":              true,
-	"junk e-mail":       true,
-	"bulk mail":         true,
-	"archive":           true,
-	"@30daytrash":       true,
+// sentOrDraftsAttrs are IMAP attributes for folders we skip during listing.
+var sentOrDraftsAttrs = map[imap.MailboxAttr]bool{
+	imap.MailboxAttrSent:   true,
+	imap.MailboxAttrDrafts: true,
 }
 
-// isTrashOrJunkFolder returns true if the folder name matches a known
-// trash/junk/spam/archive folder that should not trigger rule creation.
-func isTrashOrJunkFolder(folder string) bool {
-	lower := strings.ToLower(folder)
-	if trashOrJunkFolders[lower] {
-		return true
+// sentOrDraftsNames is a fallback list of exact folder names (case-insensitive)
+// for Sent/Drafts folders when the server doesn't report attributes.
+var sentOrDraftsNames = map[string]bool{
+	"drafts":           true,
+	"sent":             true,
+	"sent messages":    true,
+	"sent items":       true,
+	"[gmail]/sent mail": true,
+	"[gmail]/drafts":   true,
+}
+
+// systemTrashNames is a fallback list of exact folder names (case-insensitive)
+// that are known system trash/junk/spam folders. Used when the IMAP server
+// doesn't report special-use attributes (RFC 6154).
+// NOTE: Only exact matches — NOT substring matching. This ensures user-created
+// folders like @3DayTrash are not incorrectly filtered.
+var systemTrashNames = map[string]bool{
+	"trash":            true,
+	"deleted messages": true,
+	"deleted items":    true,
+	"[gmail]/trash":    true,
+	"[gmail]/all mail": true,
+	"[gmail]/spam":     true,
+	"junk":             true,
+	"spam":             true,
+	"junk e-mail":      true,
+	"bulk mail":        true,
+}
+
+// isSkipFolder returns true if the folder should not trigger rule creation.
+// It checks IMAP special-use attributes first (authoritative), then falls back
+// to exact name matching for servers that don't report attributes.
+// User-created folders like @3DayTrash will NOT match because we use exact
+// name comparison, not substring matching.
+func isSkipFolder(name string, attrs []imap.MailboxAttr) bool {
+	// First: check IMAP attributes (authoritative if present)
+	for _, attr := range attrs {
+		if skipFolderAttrs[attr] {
+			return true
+		}
 	}
-	// Also check prefixes for Gmail-style folders
-	if strings.HasPrefix(lower, "[gmail]/trash") {
-		return true
-	}
-	if strings.HasPrefix(lower, "[gmail]/spam") {
-		return true
-	}
-	// Check for "trash" anywhere in the name
-	if strings.Contains(lower, "trash") {
-		return true
-	}
-	return false
+
+	// Fallback: exact name match for well-known system folder names
+	lower := strings.ToLower(name)
+	return systemTrashNames[lower]
 }
 
 // Detector monitors IMAP accounts for message moves between folders.
@@ -298,7 +312,7 @@ func (w *moveWorker) scan(ctx context.Context) error {
 		}
 
 		destFolder := w.findMessageInFolders(client, info.MessageID, folders)
-		if destFolder == "" {
+		if destFolder.Name == "" {
 			// Message was deleted, not moved
 			logger.Debug().
 				Str("message_id", info.MessageID).
@@ -306,12 +320,12 @@ func (w *moveWorker) scan(ctx context.Context) error {
 			continue
 		}
 
-		// Skip rule creation if destination is a trash/junk/spam folder
-		if isTrashOrJunkFolder(destFolder) {
+		// Skip rule creation if destination is a system trash/junk/archive folder (by IMAP attribute)
+		if isSkipFolder(destFolder.Name, destFolder.Attrs) {
 			logger.Info().
 				Str("message_id", info.MessageID).
-				Str("destination", destFolder).
-				Msg("message moved to trash/junk folder, skipping rule creation")
+				Str("destination", destFolder.Name).
+				Msg("message moved to system trash/junk/archive folder (by attribute), skipping rule creation")
 			continue
 		}
 
@@ -319,8 +333,8 @@ func (w *moveWorker) scan(ctx context.Context) error {
 			Str("message_id", info.MessageID).
 			Str("subject", info.Subject).
 			Str("sender", info.Sender).
-			Str("destination", destFolder).
-			Msg("detected move: INBOX → " + destFolder)
+			Str("destination", destFolder.Name).
+			Msg("detected move: INBOX → " + destFolder.Name)
 
 		// Record the move
 		move := &models.DetectedMove{
@@ -330,7 +344,7 @@ func (w *moveWorker) scan(ctx context.Context) error {
 			Sender:     info.Sender,
 			Subject:    info.Subject,
 			FromFolder: "INBOX",
-			ToFolder:   destFolder,
+			ToFolder:   destFolder.Name,
 		}
 
 		if err := w.db.RecordDetectedMove(ctx, move); err != nil {
@@ -407,11 +421,17 @@ func (w *moveWorker) fetchFolderUIDs(client *imapclient.Client, folder string, w
 	return result, nil
 }
 
-// listFolders returns all mailbox names, excluding skip folders.
-func (w *moveWorker) listFolders(client *imapclient.Client) ([]string, error) {
+// folderInfo holds a folder name and its IMAP attributes from the LIST response.
+type folderInfo struct {
+	Name  string
+	Attrs []imap.MailboxAttr
+}
+
+// listFolders returns all mailbox info, excluding skip folders (by IMAP attribute).
+func (w *moveWorker) listFolders(client *imapclient.Client) ([]folderInfo, error) {
 	listCmd := client.List("", "*", nil)
 
-	var folders []string
+	var folders []folderInfo
 	for {
 		data := listCmd.Next()
 		if data == nil {
@@ -420,9 +440,6 @@ func (w *moveWorker) listFolders(client *imapclient.Client) ([]string, error) {
 
 		name := data.Mailbox
 		if name == "INBOX" {
-			continue
-		}
-		if skipFolders[name] {
 			continue
 		}
 		// Skip \Noselect mailboxes
@@ -436,7 +453,21 @@ func (w *moveWorker) listFolders(client *imapclient.Client) ([]string, error) {
 		if noSelect {
 			continue
 		}
-		folders = append(folders, name)
+		// Skip Sent/Drafts folders (by IMAP attribute, with name fallback)
+		isSentOrDrafts := false
+		for _, attr := range data.Attrs {
+			if sentOrDraftsAttrs[attr] {
+				isSentOrDrafts = true
+				break
+			}
+		}
+		if !isSentOrDrafts {
+			isSentOrDrafts = sentOrDraftsNames[strings.ToLower(name)]
+		}
+		if isSentOrDrafts {
+			continue
+		}
+		folders = append(folders, folderInfo{Name: name, Attrs: data.Attrs})
 	}
 
 	if err := listCmd.Close(); err != nil {
@@ -447,10 +478,10 @@ func (w *moveWorker) listFolders(client *imapclient.Client) ([]string, error) {
 }
 
 // findMessageInFolders searches for a message by Message-ID in the given folders.
-// Returns the folder name where found, or empty string if not found.
-func (w *moveWorker) findMessageInFolders(client *imapclient.Client, messageID string, folders []string) string {
+// Returns the folderInfo where found, or empty result if not found.
+func (w *moveWorker) findMessageInFolders(client *imapclient.Client, messageID string, folders []folderInfo) folderInfo {
 	for _, folder := range folders {
-		selectCmd := client.Select(folder, nil)
+		selectCmd := client.Select(folder.Name, nil)
 		mbox, err := selectCmd.Wait()
 		if err != nil {
 			continue
@@ -477,7 +508,7 @@ func (w *moveWorker) findMessageInFolders(client *imapclient.Client, messageID s
 		}
 	}
 
-	return ""
+	return folderInfo{}
 }
 
 // inferAndCreateRule analyzes the moved message and creates a rule.
