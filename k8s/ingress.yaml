@@ -22,6 +22,14 @@ spec:
     - host: email-automation.oc.ctb.padz.net
       http:
         paths:
+          # OAuth2 callback must go to frontend (returns HTML that closes popup)
+          - path: /api/oauth2/callback
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
           # API routes
           - path: /api
             pathType: Prefix
