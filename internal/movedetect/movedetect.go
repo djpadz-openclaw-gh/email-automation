@@ -648,12 +648,14 @@ func (w *moveWorker) findMessagesInFoldersBatch(client *imapclient.Client, messa
 
 // inferAndCreateRule analyzes the moved message and creates a rule.
 func (w *moveWorker) inferAndCreateRule(ctx context.Context, move *models.DetectedMove) (*models.Rule, error) {
-	// Check if this move was performed by the rules engine (avoid self-detection)
-	processed, err := w.db.IsMessageProcessed(ctx, w.account.ID, move.MessageUID)
+	// Check if this move was performed by the rules engine (avoid self-detection).
+	// We only skip if the rules engine actually MOVED this message. Other actions
+	// (like "flag") should not prevent rule creation when the user manually moves it.
+	movedByRule, err := w.db.IsMessageMovedByRule(ctx, w.account.ID, move.MessageUID)
 	if err != nil {
-		log.Warn().Err(err).Msg("failed to check if message was processed by rules engine")
+		log.Warn().Err(err).Msg("failed to check if message was moved by rules engine")
 	}
-	if processed {
+	if movedByRule {
 		log.Debug().
 			Str("message_id", move.MessageID).
 			Msg("skipping rule creation: message was moved by rules engine")

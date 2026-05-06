@@ -212,12 +212,15 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 			continue
 		}
 
-		// Fallback: check processed_messages table (legacy check)
-		processed, err := w.db.IsMessageProcessed(ctx, w.account.ID, msg.uidStr)
+		// Fallback: check processed_messages table for move actions specifically.
+		// We only skip rule creation if the rules engine actually MOVED this message.
+		// Other actions (like "flag") should not prevent rule creation when the user
+		// manually moves a message later.
+		movedByRule, err := w.db.IsMessageMovedByRule(ctx, w.account.ID, msg.uidStr)
 		if err != nil {
-			logger.Warn().Err(err).Msg("failed to check if message was processed by rules engine")
+			logger.Warn().Err(err).Msg("failed to check if message was moved by rules engine")
 		}
-		if processed {
+		if movedByRule {
 			logger.Debug().
 				Str("message_id", msg.loc.MessageID).
 				Msg("skipping rule creation: message was moved by rules engine")

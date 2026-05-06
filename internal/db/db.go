@@ -665,6 +665,23 @@ func (db *DB) IsMessageProcessed(ctx context.Context, accountID int64, messageUI
 	return count > 0, nil
 }
 
+// IsMessageMovedByRule checks if a message was specifically moved by the rules engine.
+// This is more specific than IsMessageProcessed, which returns true for any action
+// (including "flag"). Use this when deciding whether to skip rule creation from
+// user-initiated moves — a flagged message that the user later moves manually
+// should still trigger rule creation.
+func (db *DB) IsMessageMovedByRule(ctx context.Context, accountID int64, messageUID string) (bool, error) {
+	var count int
+	err := db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM processed_messages WHERE account_id = $1 AND message_uid = $2 AND action = 'move'`,
+		accountID, messageUID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (db *DB) MarkMessageProcessed(ctx context.Context, accountID int64, messageUID string, ruleID int64, action string) error {
 	_, err := db.Pool.Exec(ctx,
 		`INSERT INTO processed_messages (account_id, message_uid, rule_id, action)
