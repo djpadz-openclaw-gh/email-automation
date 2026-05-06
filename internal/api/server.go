@@ -181,6 +181,8 @@ func (s *Server) setupRoutes() {
 	v1.Delete("/rules/:id", ruleH.DeleteRule)
 	v1.Post("/rules/test", ruleH.TestRule)
 	v1.Post("/rules/validate", ruleH.ValidateRule)
+	v1.Post("/rules/dry-run", ruleH.DryRunAdHoc)
+	v1.Post("/rules/cancel-adhoc", ruleH.CancelAdHocOperation)
 	v1.Get("/logs", ruleH.ListExecutionLogs)
 	v1.Get("/rules/suggested", ruleH.ListSuggestedRules)
 	v1.Post("/rules/:id/approve", ruleH.ApproveRule)

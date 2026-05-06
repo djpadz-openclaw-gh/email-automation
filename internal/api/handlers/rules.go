@@ -243,6 +243,116 @@ func (h *RuleHandlers) ListExecutionLogs(c *fiber.Ctx) error {
 	return c.JSON(logs)
 }
 
+// DryRunAdHoc evaluates lua_code against all INBOX emails without requiring a saved rule.
+func (h *RuleHandlers) DryRunAdHoc(c *fiber.Ctx) error {
+	var body struct {
+		LuaCode string `json:"lua_code"`
+		Limit   int    `json:"limit"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if body.LuaCode == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "lua_code is required"})
+	}
+
+	// Validate Lua syntax first
+	if err := h.Engine.ValidateLua(body.LuaCode); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid Lua code", "details": err.Error()})
+	}
+
+	rule := &models.Rule{
+		Name:    "ad-hoc",
+		LuaCode: body.LuaCode,
+	}
+
+	// Create a cancellable context and register it for external cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opKey := fmt.Sprintf("tenant:%d:adhoc", h.tenantID(c))
+	h.activeOps.Store(opKey, cancel)
+	defer h.activeOps.Delete(opKey)
+
+	// Fetch all accounts for this tenant
+	accounts, err := h.DB.ListAccounts(ctx, h.tenantID(c))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list accounts"})
+	}
+
+	if len(accounts) == 0 {
+		return c.JSON(models.DryRunResult{
+			TotalScanned: 0,
+			TotalMatched: 0,
+			Matches:      []models.DryRunMatch{},
+		})
+	}
+
+	var result models.DryRunResult
+	result.Matches = []models.DryRunMatch{}
+
+	for _, acc := range accounts {
+		if ctx.Err() != nil {
+			break
+		}
+		if !acc.Active {
+			continue
+		}
+
+		fullAcc, err := h.DB.GetAccount(ctx, h.tenantID(c), acc.ID)
+		if err != nil {
+			log.Warn().Err(err).Int64("account_id", acc.ID).Msg("failed to get account for ad-hoc dry-run")
+			continue
+		}
+
+		emails, err := fetchINBOXEmails(fullAcc, body.Limit)
+		if err != nil {
+			log.Warn().Err(err).Int64("account_id", acc.ID).Msg("failed to fetch INBOX emails for ad-hoc dry-run")
+			continue
+		}
+
+		for _, email := range emails {
+			if ctx.Err() != nil {
+				break
+			}
+			result.TotalScanned++
+			ruleResult, err := h.Engine.Evaluate(rule, &email)
+			if err != nil {
+				continue
+			}
+			if ruleResult.Action != "skip" {
+				result.TotalMatched++
+				result.Matches = append(result.Matches, models.DryRunMatch{
+					MessageID:     email.MessageID,
+					Subject:       email.Subject,
+					SenderAddress: email.SenderAddress,
+					Action:        ruleResult.Action,
+					Target:        ruleResult.Target,
+					Reason:        ruleResult.Reason,
+				})
+			}
+		}
+	}
+
+	if ctx.Err() != nil {
+		result.Cancelled = true
+	}
+
+	return c.JSON(result)
+}
+
+// CancelAdHocOperation cancels an in-progress ad-hoc dry-run operation.
+func (h *RuleHandlers) CancelAdHocOperation(c *fiber.Ctx) error {
+	opKey := fmt.Sprintf("tenant:%d:adhoc", h.tenantID(c))
+	if cancelFn, ok := h.activeOps.LoadAndDelete(opKey); ok {
+		cancelFn.(context.CancelFunc)()
+		log.Info().Int64("tenant_id", h.tenantID(c)).Msg("ad-hoc operation cancelled by user")
+		return c.JSON(fiber.Map{"message": "operation cancelled"})
+	}
+
+	return c.JSON(fiber.Map{"message": "no active operation found"})
+}
+
 // DryRunRule evaluates a rule against all INBOX emails without executing actions.
 func (h *RuleHandlers) DryRunRule(c *fiber.Ctx) error {
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)

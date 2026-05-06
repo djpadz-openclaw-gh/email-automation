@@ -486,6 +486,20 @@ class ApiClient {
     });
   }
 
+  async dryRunAdHoc(luaCode: string, limit?: number, signal?: AbortSignal): Promise<DryRunResult> {
+    const body: Record<string, unknown> = { lua_code: luaCode };
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<DryRunResult>('/api/v1/rules/dry-run', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async cancelAdHocOperation(): Promise<{ message: string }> {
+    return this.request('/api/v1/rules/cancel-adhoc', { method: 'POST' });
+  }
+
   async executeRule(id: number, luaCode?: string, limit?: number, signal?: AbortSignal): Promise<ExecuteResult> {
     const body: Record<string, unknown> = {};
     if (luaCode) body.lua_code = luaCode;

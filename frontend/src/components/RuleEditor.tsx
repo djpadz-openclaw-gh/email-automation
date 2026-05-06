@@ -474,109 +474,146 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
             >
               {saving ? 'Saving...' : rule ? 'Update Rule' : 'Create Rule'}
             </button>
-            {rule && (
-              <>
-                {/* Scan limit selector */}
-                <select
-                  value={scanLimit}
-                  onChange={(e) => setScanLimit(Number(e.target.value))}
-                  disabled={dryRunning || executing}
-                  className="px-3 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none disabled:opacity-50"
-                  aria-label="Scan limit"
-                >
-                  <option value={0}>All messages</option>
-                  <option value={100}>Last 100</option>
-                  <option value={500}>Last 500</option>
-                  <option value={1000}>Last 1,000</option>
-                  <option value={5000}>Last 5,000</option>
-                </select>
 
-                {/* Dry Run / Stop button */}
-                {dryRunning ? (
-                  <button
-                    onClick={() => {
-                      abortControllerRef.current?.abort();
-                      abortControllerRef.current = null;
-                      api.cancelRuleOperation(rule.id).catch(() => {});
-                    }}
-                    className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
-                  >
-                    ⏹ Stop
-                  </button>
-                ) : (
-                  <button
-                    onClick={async () => {
-                      try {
-                        const controller = new AbortController();
-                        abortControllerRef.current = controller;
-                        setDryRunning(true);
-                        setDryRunResult(null);
-                        setExecuteResult(null);
-                        setError('');
-                        const result = await api.dryRunRule(rule.id, luaCode, scanLimit || undefined, controller.signal);
-                        setDryRunResult(result);
-                      } catch (err: unknown) {
-                        if (err instanceof DOMException && err.name === 'AbortError') {
-                          // User cancelled — don't show error
-                        } else {
-                          setError(err instanceof Error ? err.message : 'Dry run failed');
-                        }
-                      } finally {
-                        setDryRunning(false);
-                        abortControllerRef.current = null;
-                      }
-                    }}
-                    disabled={false}
-                    className="px-5 py-2.5 bg-amber-500 text-white rounded-lg font-medium hover:bg-amber-600 transition-colors"
-                  >
-                    🔍 Dry Run
-                  </button>
-                )}
+            {/* Scan limit selector */}
+            <select
+              value={scanLimit}
+              onChange={(e) => setScanLimit(Number(e.target.value))}
+              disabled={dryRunning || executing}
+              className="px-3 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none disabled:opacity-50"
+              aria-label="Scan limit"
+            >
+              <option value={0}>All messages</option>
+              <option value={100}>Last 100</option>
+              <option value={500}>Last 500</option>
+              <option value={1000}>Last 1,000</option>
+              <option value={5000}>Last 5,000</option>
+            </select>
 
-                {/* Execute / Stop button */}
-                {executing ? (
-                  <button
-                    onClick={() => {
-                      abortControllerRef.current?.abort();
-                      abortControllerRef.current = null;
-                      api.cancelRuleOperation(rule.id).catch(() => {});
-                    }}
-                    className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
-                  >
-                    ⏹ Stop
-                  </button>
-                ) : (
-                  <button
-                    onClick={async () => {
-                      if (!confirm('Execute this rule against INBOX messages? Actions will be performed immediately.')) return;
-                      try {
-                        const controller = new AbortController();
-                        abortControllerRef.current = controller;
-                        setExecuting(true);
-                        setExecuteResult(null);
-                        setDryRunResult(null);
-                        setError('');
-                        const result = await api.executeRule(rule.id, luaCode, scanLimit || undefined, controller.signal);
-                        setExecuteResult(result);
-                      } catch (err: unknown) {
-                        if (err instanceof DOMException && err.name === 'AbortError') {
-                          // User cancelled
-                        } else {
-                          setError(err instanceof Error ? err.message : 'Execution failed');
-                        }
-                      } finally {
-                        setExecuting(false);
-                        abortControllerRef.current = null;
-                      }
-                    }}
-                    disabled={dryRunning}
-                    className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    ⚡ Execute Now
-                  </button>
-                )}
-              </>
+            {/* Dry Run / Stop button */}
+            {dryRunning ? (
+              <button
+                onClick={() => {
+                  abortControllerRef.current?.abort();
+                  abortControllerRef.current = null;
+                  if (rule) {
+                    api.cancelRuleOperation(rule.id).catch(() => {});
+                  } else {
+                    api.cancelAdHocOperation().catch(() => {});
+                  }
+                }}
+                className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
+              >
+                ⏹ Stop
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  try {
+                    const controller = new AbortController();
+                    abortControllerRef.current = controller;
+                    setDryRunning(true);
+                    setDryRunResult(null);
+                    setExecuteResult(null);
+                    setError('');
+                    let result;
+                    if (rule) {
+                      result = await api.dryRunRule(rule.id, luaCode, scanLimit || undefined, controller.signal);
+                    } else {
+                      result = await api.dryRunAdHoc(luaCode, scanLimit || undefined, controller.signal);
+                    }
+                    setDryRunResult(result);
+                  } catch (err: unknown) {
+                    if (err instanceof DOMException && err.name === 'AbortError') {
+                      // User cancelled — don't show error
+                    } else {
+                      setError(err instanceof Error ? err.message : 'Dry run failed');
+                    }
+                  } finally {
+                    setDryRunning(false);
+                    abortControllerRef.current = null;
+                  }
+                }}
+                disabled={false}
+                className="px-5 py-2.5 bg-amber-500 text-white rounded-lg font-medium hover:bg-amber-600 transition-colors"
+              >
+                🔍 Dry Run
+              </button>
             )}
+
+            {/* Execute / Stop button */}
+            {executing ? (
+              <button
+                onClick={() => {
+                  abortControllerRef.current?.abort();
+                  abortControllerRef.current = null;
+                  if (rule) {
+                    api.cancelRuleOperation(rule.id).catch(() => {});
+                  } else {
+                    api.cancelAdHocOperation().catch(() => {});
+                  }
+                }}
+                className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors"
+              >
+                ⏹ Stop
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  if (!confirm('Execute this rule against INBOX messages? Actions will be performed immediately.')) return;
+                  if (!name.trim()) {
+                    setError('Rule name is required to execute');
+                    return;
+                  }
+                  try {
+                    const controller = new AbortController();
+                    abortControllerRef.current = controller;
+                    setExecuting(true);
+                    setExecuteResult(null);
+                    setDryRunResult(null);
+                    setError('');
+
+                    let ruleId: number;
+                    if (rule) {
+                      ruleId = rule.id;
+                    } else {
+                      // Save the rule first, then execute
+                      const created = await api.createRule({
+                        name: name.trim(),
+                        description: description.trim(),
+                        lua_code: luaCode,
+                        priority,
+                        active,
+                        uses_ai: usesAi,
+                      });
+                      ruleId = created.id;
+                    }
+
+                    const result = await api.executeRule(ruleId, luaCode, scanLimit || undefined, controller.signal);
+                    setExecuteResult(result);
+
+                    if (!rule) {
+                      // Rule was created — notify parent to refresh
+                      onSave();
+                    }
+                  } catch (err: unknown) {
+                    if (err instanceof DOMException && err.name === 'AbortError') {
+                      // User cancelled
+                    } else {
+                      setError(err instanceof Error ? err.message : 'Execution failed');
+                    }
+                  } finally {
+                    setExecuting(false);
+                    abortControllerRef.current = null;
+                  }
+                }}
+                disabled={dryRunning}
+                className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                ⚡ Execute Now
+              </button>
+            )}
+
             <button
               onClick={onCancel}
               className="px-6 py-2.5 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
@@ -586,7 +623,7 @@ export default function RuleEditor({ rule, onSave, onCancel }: RuleEditorProps) 
           </div>
 
           {/* AI classification warning */}
-          {usesAiClassify && rule && (dryRunning || executing || (!dryRunResult && !executeResult)) && (
+          {usesAiClassify && (dryRunning || executing || (!dryRunResult && !executeResult)) && (
             <div className="mt-3 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-700 dark:text-amber-400 text-sm" role="alert">
               ⚠️ This rule uses AI classification. Scanning many messages will take a long time and consume API quota.
             </div>
