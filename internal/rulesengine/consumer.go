@@ -303,7 +303,7 @@ func (c *Consumer) handleMessage(ctx context.Context, msg jetstream.Msg) {
 	var actionErr error
 	switch result.Action {
 	case "delete", "move", "archive", "flag":
-		actionErr = c.executor.ExecuteAction(ctx, event.AccountID, event.UID, result.Action, result.Target)
+		actionErr = c.executor.ExecuteActionForRule(ctx, event.AccountID, event.UID, result.Action, result.Target, matchedRule.ID, event.MessageID)
 	case "notify":
 		notifyMsg := result.Target
 		if notifyMsg == "" {

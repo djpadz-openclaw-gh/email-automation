@@ -286,9 +286,25 @@ func executeDelete(client *imapclient.Client, uidSet imap.UIDSet) error {
 	return nil
 }
 
+// RuleAppliedFlag is the custom IMAP flag set on messages moved by rules.
+// Move detection checks for this flag to avoid creating feedback loops.
+const RuleAppliedFlag imap.Flag = "$RuleApplied"
+
 func executeMove(client *imapclient.Client, uidSet imap.UIDSet, folder string) error {
 	createCmd := client.Create(folder, nil)
 	_ = createCmd.Wait()
+
+	// Set the $RuleApplied flag BEFORE moving so it travels with the message.
+	// This prevents the move detector from treating rule-driven moves as user actions.
+	storeCmd := client.Store(uidSet, &imap.StoreFlags{
+		Op:    imap.StoreFlagsAdd,
+		Flags: []imap.Flag{RuleAppliedFlag},
+	}, nil)
+	if err := storeCmd.Close(); err != nil {
+		// Non-fatal: some servers may not support custom flags on INBOX.
+		// Log and continue with the move.
+		log.Warn().Err(err).Str("uids", uidSet.String()).Msg("failed to set $RuleApplied flag before move (continuing)")
+	}
 
 	moveCmd := client.Move(uidSet, folder)
 	if _, err := moveCmd.Wait(); err != nil {
@@ -335,6 +351,42 @@ func executeFlag(client *imapclient.Client, uidSet imap.UIDSet, flagName string)
 
 	log.Info().Str("uids", uidSet.String()).Str("flag", string(imapFlag)).Msg("flagged message(s)")
 	return nil
+}
+
+// ExecuteActionForRule performs an IMAP action and records it in rule_applied_moves
+// if it's a move or archive action. This prevents the watcher from creating
+// feedback-loop rules for rule-driven moves.
+func (e *Executor) ExecuteActionForRule(ctx context.Context, accountID int64, uid uint32, action, target string, ruleID int64, messageID string) error {
+	// Record the move BEFORE executing so the watcher can detect it even if
+	// there's a race condition with IDLE notifications.
+	if (action == "move" || action == "archive") && messageID != "" {
+		folder := target
+		if action == "archive" {
+			folder = "Archive"
+		}
+		if err := e.db.RecordRuleAppliedMove(ctx, ruleID, accountID, messageID, folder); err != nil {
+			log.Warn().Err(err).Int64("rule_id", ruleID).Str("message_id", messageID).Msg("failed to record rule-applied move (continuing with action)")
+		}
+	}
+
+	return e.ExecuteAction(ctx, accountID, uid, action, target)
+}
+
+// ExecuteActionByMessageIDForRule performs an IMAP action found by Message-ID
+// and records it in rule_applied_moves if it's a move or archive action.
+func (e *Executor) ExecuteActionByMessageIDForRule(ctx context.Context, accountID int64, messageID, action, target string, ruleID int64) error {
+	// Record the move BEFORE executing.
+	if (action == "move" || action == "archive") && messageID != "" {
+		folder := target
+		if action == "archive" {
+			folder = "Archive"
+		}
+		if err := e.db.RecordRuleAppliedMove(ctx, ruleID, accountID, messageID, folder); err != nil {
+			log.Warn().Err(err).Int64("rule_id", ruleID).Str("message_id", messageID).Msg("failed to record rule-applied move (continuing with action)")
+		}
+	}
+
+	return e.ExecuteActionByMessageID(ctx, accountID, messageID, action, target)
 }
 
 func (e *Executor) executeNotify(ctx context.Context, message string) error {

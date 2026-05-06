@@ -45,6 +45,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
+	// Cleanup ticker runs every hour to remove stale rule_applied_moves entries
+	cleanupTicker := time.NewTicker(1 * time.Hour)
+	defer cleanupTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -55,7 +59,19 @@ func (s *Scheduler) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.processPending(ctx)
+		case <-cleanupTicker.C:
+			s.cleanupStaleData(ctx)
 		}
+	}
+}
+
+// cleanupStaleData removes expired rule_applied_moves and old message locations.
+func (s *Scheduler) cleanupStaleData(ctx context.Context) {
+	deleted, err := s.db.CleanOldRuleAppliedMoves(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to clean old rule_applied_moves")
+	} else if deleted > 0 {
+		log.Info().Int64("deleted", deleted).Msg("cleaned old rule_applied_moves entries")
 	}
 }
 
@@ -89,7 +105,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 		logger.Info().Msg("executing deferred action")
 
 		// Execute the action via IMAP using Message-ID search
-		actionErr := s.executor.ExecuteActionByMessageID(ctx, action.AccountID, action.MessageID, action.Action, action.Target)
+		actionErr := s.executor.ExecuteActionByMessageIDForRule(ctx, action.AccountID, action.MessageID, action.Action, action.Target, action.RuleID)
 
 		errMsg := ""
 		if actionErr != nil {

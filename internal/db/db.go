@@ -380,6 +380,31 @@ func (db *DB) UpdateAccountOAuthTokens(ctx context.Context, accountID int64, acc
 	return err
 }
 
+// GetActiveAccountByID retrieves a single active account by ID (no tenant filter).
+// Used by IMAP workers to refresh credentials without knowing the tenant.
+func (db *DB) GetActiveAccountByID(ctx context.Context, accountID int64) (*models.Account, error) {
+	a := &models.Account{}
+	err := db.Pool.QueryRow(ctx,
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, password, oauth_token, oauth_refresh_token, oauth_token_expiry, oauth_provider, active, last_sync_at, created_at, updated_at
+		 FROM accounts WHERE id = $1 AND active = true`, accountID,
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.Password, &a.OAuthToken, &a.OAuthRefreshToken, &a.OAuthTokenExpiry, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	// Decrypt password
+	if decrypted, decErr := db.decryptPassword(a.Password, a.ID); decErr == nil {
+		a.Password = decrypted
+	}
+	// Decrypt OAuth tokens
+	if decrypted, decErr := db.decryptPassword(a.OAuthToken, a.ID); decErr == nil {
+		a.OAuthToken = decrypted
+	}
+	if decrypted, decErr := db.decryptPassword(a.OAuthRefreshToken, a.ID); decErr == nil {
+		a.OAuthRefreshToken = decrypted
+	}
+	return a, nil
+}
+
 func (db *DB) UpdateAccountSyncTime(ctx context.Context, accountID int64) error {
 	_, err := db.Pool.Exec(ctx, `UPDATE accounts SET last_sync_at = NOW() WHERE id = $1`, accountID)
 	return err
@@ -759,6 +784,76 @@ func (db *DB) CleanOldMessageLocations(ctx context.Context, olderThan time.Durat
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// --- Rule-applied move tracking (feedback loop prevention) ---
+
+// RecordRuleAppliedMove records that a rule moved a message to a folder.
+// The watcher checks this table to avoid creating rules from rule-driven moves.
+func (db *DB) RecordRuleAppliedMove(ctx context.Context, ruleID, accountID int64, messageID, folder string) error {
+	_, err := db.Pool.Exec(ctx,
+		`INSERT INTO rule_applied_moves (rule_id, message_id, account_id, folder)
+		 VALUES ($1, $2, $3, $4)`,
+		ruleID, messageID, accountID, folder)
+	return err
+}
+
+// IsRuleAppliedMove checks if a message was recently moved by a rule (within 24 hours).
+// Returns true if the move was rule-driven and should NOT trigger new rule creation.
+func (db *DB) IsRuleAppliedMove(ctx context.Context, accountID int64, messageID string) (bool, error) {
+	var count int
+	err := db.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM rule_applied_moves
+		 WHERE account_id = $1 AND message_id = $2 AND created_at > NOW() - INTERVAL '24 hours'`,
+		accountID, messageID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// CleanOldRuleAppliedMoves removes rule_applied_moves entries older than 24 hours.
+func (db *DB) CleanOldRuleAppliedMoves(ctx context.Context) (int64, error) {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	tag, err := db.Pool.Exec(ctx,
+		`DELETE FROM rule_applied_moves WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// --- Bulk rule operations ---
+
+// BulkDeleteRules deletes multiple rules by ID within a transaction.
+// Returns the number of rules actually deleted.
+func (db *DB) BulkDeleteRules(ctx context.Context, tenantID int64, ruleIDs []int64) (int64, error) {
+	if len(ruleIDs) == 0 {
+		return 0, nil
+	}
+
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var totalDeleted int64
+	for _, id := range ruleIDs {
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM rules WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+		if err != nil {
+			return 0, fmt.Errorf("delete rule %d: %w", id, err)
+		}
+		totalDeleted += tag.RowsAffected()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+
+	return totalDeleted, nil
 }
 
 // RotateEncryptionKeys re-encrypts all account passwords with the current master key version.

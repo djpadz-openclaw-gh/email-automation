@@ -171,6 +171,20 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 		}
 
 		// Check if this move was performed by the rules engine (avoid self-detection)
+		// First check the rule_applied_moves table (service-agnostic, database-backed)
+		ruleApplied, err := w.db.IsRuleAppliedMove(ctx, w.account.ID, loc.MessageID)
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to check rule_applied_moves")
+		}
+		if ruleApplied {
+			logger.Info().
+				Str("message_id", loc.MessageID).
+				Str("destination", destFolder).
+				Msg("skipping rule creation: move was performed by a rule (rule_applied_moves)")
+			continue
+		}
+
+		// Fallback: check processed_messages table (legacy check)
 		processed, err := w.db.IsMessageProcessed(ctx, w.account.ID, uidStr)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to check if message was processed by rules engine")

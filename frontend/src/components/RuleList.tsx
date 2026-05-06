@@ -15,6 +15,11 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
   const [error, setError] = useState('');
   const [reordering, setReordering] = useState(false);
 
+  // Bulk selection state
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [showBulkConfirm, setShowBulkConfirm] = useState(false);
+
   // Drag state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [insertIndex, setInsertIndex] = useState<number | null>(null);
@@ -75,6 +80,43 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
       await loadRules();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to dismiss rule');
+    }
+  };
+
+  // --- Bulk selection ---
+  const handleSelectToggle = (ruleId: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(ruleId)) {
+        next.delete(ruleId);
+      } else {
+        next.add(ruleId);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    if (selectedIds.size === rules.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(rules.map((r) => r.id)));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    setError('');
+    try {
+      await api.bulkDeleteRules(Array.from(selectedIds));
+      setSelectedIds(new Set());
+      setShowBulkConfirm(false);
+      await loadRules();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete rules');
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -191,6 +233,60 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
         </button>
       </div>
 
+      {/* Bulk action toolbar */}
+      {selectedIds.size > 0 && (
+        <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
+              {selectedIds.size} rule{selectedIds.size !== 1 ? 's' : ''} selected
+            </span>
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Clear selection
+            </button>
+          </div>
+          <button
+            onClick={() => setShowBulkConfirm(true)}
+            disabled={bulkDeleting}
+            className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {bulkDeleting ? 'Deleting...' : `Delete Selected (${selectedIds.size})`}
+          </button>
+        </div>
+      )}
+
+      {/* Bulk delete confirmation dialog */}
+      {showBulkConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" aria-labelledby="bulk-delete-title">
+          <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 p-6 max-w-md w-full mx-4 shadow-xl">
+            <h3 id="bulk-delete-title" className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+              Delete {selectedIds.size} rule{selectedIds.size !== 1 ? 's' : ''}?
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
+              This action cannot be undone. The selected rules will be permanently deleted along with their execution logs.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowBulkConfirm(false)}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBulkDelete}
+                disabled={bulkDeleting}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {bulkDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm" role="alert">
           {error}
@@ -276,9 +372,23 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
           onDragLeave={handleDragLeaveList}
         >
           {rules.length > 1 && (
-            <p className="text-xs text-gray-400 dark:text-gray-500 mb-2">
-              Drag rules to reorder. Rules are evaluated top to bottom — first match wins.
-            </p>
+            <div className="flex items-center gap-2 mb-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.size === rules.length && rules.length > 0}
+                  onChange={handleSelectAll}
+                  className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+                  aria-label="Select all rules"
+                />
+                <span className="text-xs text-gray-400 dark:text-gray-500">
+                  Select all
+                </span>
+              </label>
+              <span className="text-xs text-gray-400 dark:text-gray-500">
+                · Drag rules to reorder. Rules are evaluated top to bottom — first match wins.
+              </span>
+            </div>
           )}
           {rules.map((rule, index) => {
             // Show insertion line if this slot is active and it's not a no-op position
@@ -311,6 +421,18 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
                 }`}
               >
               <div className="flex items-start">
+                {/* Selection checkbox */}
+                <div className="flex items-center justify-center w-6 h-6 mr-2 mt-0.5 shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(rule.id)}
+                    onChange={() => handleSelectToggle(rule.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+                    aria-label={`Select rule: ${rule.name}`}
+                  />
+                </div>
+
                 {/* Drag handle */}
                 <div
                   className="flex items-center justify-center w-6 h-6 mr-3 mt-0.5 cursor-grab active:cursor-grabbing text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 select-none shrink-0"

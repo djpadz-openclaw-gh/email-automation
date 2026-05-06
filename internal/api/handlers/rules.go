@@ -455,7 +455,7 @@ func (h *RuleHandlers) ExecuteRule(c *fiber.Ctx) error {
 			var actionErr error
 			switch ruleResult.Action {
 			case "delete", "move", "archive", "flag":
-				actionErr = executor.ExecuteActionByMessageID(ctx, acc.ID, email.MessageID, ruleResult.Action, ruleResult.Target)
+				actionErr = executor.ExecuteActionByMessageIDForRule(ctx, acc.ID, email.MessageID, ruleResult.Action, ruleResult.Target, rule.ID)
 			case "defer":
 				if ruleResult.Delay > 0 {
 					deferred := &models.DeferredAction{
@@ -579,6 +579,37 @@ func (h *RuleHandlers) ReorderRules(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"message": "rules reordered"})
+}
+
+// BulkDeleteRules deletes multiple rules in a single transaction.
+func (h *RuleHandlers) BulkDeleteRules(c *fiber.Ctx) error {
+	var req struct {
+		RuleIDs []int64 `json:"rule_ids"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	if len(req.RuleIDs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "rule_ids is required"})
+	}
+
+	deleted, err := h.DB.BulkDeleteRules(c.Context(), h.tenantID(c), req.RuleIDs)
+	if err != nil {
+		log.Error().Err(err).Int64("tenant_id", h.tenantID(c)).Int("count", len(req.RuleIDs)).Msg("bulk delete rules failed")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	log.Info().
+		Int64("tenant_id", h.tenantID(c)).
+		Int64("deleted", deleted).
+		Int("requested", len(req.RuleIDs)).
+		Msg("bulk deleted rules")
+
+	return c.JSON(fiber.Map{
+		"message": fmt.Sprintf("%d rules deleted", deleted),
+		"deleted": deleted,
+	})
 }
 
 // fetchINBOXEmails connects to an IMAP account and fetches messages from INBOX.

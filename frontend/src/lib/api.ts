@@ -518,6 +518,14 @@ class ApiClient {
     });
   }
 
+  // --- Bulk Operations ---
+  async bulkDeleteRules(ruleIds: number[]): Promise<{ message: string; deleted: number }> {
+    return this.request('/api/v1/rules/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ rule_ids: ruleIds }),
+    });
+  }
+
   // --- Admin (requires system API key) ---
   private adminKey: string = '';
 

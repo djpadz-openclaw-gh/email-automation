@@ -16,6 +16,7 @@ import (
 	"github.com/djpadz/email-automation/internal/config"
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/engine"
+	natsbus "github.com/djpadz/email-automation/internal/nats"
 )
 
 // Server is the HTTP API server.
@@ -25,10 +26,11 @@ type Server struct {
 	db     *db.DB
 	engine *engine.Engine
 	jwt    *auth.JWTManager
+	bus    *natsbus.Bus // optional; for credential change events
 }
 
 // NewServer creates a new API server.
-func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine) *Server {
+func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine, opts ...ServerOption) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:      "email-automation",
 		ErrorHandler: errorHandler,
@@ -44,10 +46,24 @@ func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine) *Server 
 		jwt:    jwtMgr,
 	}
 
+	for _, opt := range opts {
+		opt(s)
+	}
+
 	s.setupMiddleware()
 	s.setupRoutes()
 
 	return s
+}
+
+// ServerOption configures optional server dependencies.
+type ServerOption func(*Server)
+
+// WithBus sets the NATS bus for event publishing.
+func WithBus(bus *natsbus.Bus) ServerOption {
+	return func(s *Server) {
+		s.bus = bus
+	}
 }
 
 func (s *Server) setupMiddleware() {
@@ -167,6 +183,7 @@ func (s *Server) setupRoutes() {
 	v1.Post("/rules/:id/dry-run", ruleH.DryRunRule)
 	v1.Post("/rules/:id/execute", ruleH.ExecuteRule)
 	v1.Post("/rules/:id/cancel", ruleH.CancelOperation)
+	v1.Post("/rules/bulk-delete", ruleH.BulkDeleteRules)
 
 	// Deferred actions
 	v1.Get("/deferred-actions", ruleH.ListDeferredActions)
@@ -174,7 +191,7 @@ func (s *Server) setupRoutes() {
 	v1.Patch("/rules/reorder", ruleH.ReorderRules)
 
 	// Accounts
-	accountH := &handlers.AccountHandlers{DB: s.db}
+	accountH := &handlers.AccountHandlers{DB: s.db, Bus: s.bus}
 	v1.Get("/accounts", accountH.ListAccounts)
 	v1.Get("/accounts/:id", accountH.GetAccount)
 	v1.Post("/accounts", accountH.CreateAccount)
@@ -183,6 +200,7 @@ func (s *Server) setupRoutes() {
 
 	// OAuth2
 	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)
+	oauth2H.Bus = s.bus
 	v1.Get("/oauth2/providers", oauth2H.ListProviders)
 	v1.Get("/oauth2/connect/:provider", oauth2H.Connect)
 	v1.Post("/oauth2/refresh/:id", oauth2H.RefreshToken)
