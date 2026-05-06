@@ -12,8 +12,14 @@ type User struct {
 	TOTPSecret   *string   `json:"-"`
 	TOTPEnabled  bool      `json:"totp_enabled"`
 	AIEnabled    bool      `json:"ai_enabled"`
+	Role         string    `json:"role"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// IsAdmin returns true if the user has the admin role.
+func (u *User) IsAdmin() bool {
+	return u.Role == "admin"
 }
 
 // Passkey represents a WebAuthn credential.
