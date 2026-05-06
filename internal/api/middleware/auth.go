@@ -137,6 +137,40 @@ func RequireAuth() fiber.Handler {
 	}
 }
 
+// RequireAdmin is a middleware that ensures the authenticated user has the admin role.
+// User #1 is always treated as admin regardless of the role column.
+func RequireAdmin(database *db.DB) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		userID, ok := c.Locals("user_id").(int64)
+		if !ok || userID == 0 {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "authentication required",
+			})
+		}
+
+		// User #1 is always admin
+		if userID == 1 {
+			return c.Next()
+		}
+
+		// Check role from database
+		user, err := database.GetUserByID(c.Context(), userID)
+		if err != nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "admin access required",
+			})
+		}
+
+		if !user.IsAdmin() {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "admin access required",
+			})
+		}
+
+		return c.Next()
+	}
+}
+
 // AuthMiddleware validates API key authentication and sets tenant context.
 // Kept for backward compatibility.
 func AuthMiddleware(database *db.DB) fiber.Handler {

@@ -156,11 +156,18 @@ func (h *AuthHandlers) GetProfile(c *fiber.Ctx) error {
 		passkeyCount = len(passkeys)
 	}
 
+	// User #1 is always admin
+	role := user.Role
+	if user.ID == 1 {
+		role = "admin"
+	}
+
 	return c.JSON(fiber.Map{
 		"id":            user.ID,
 		"username":      user.Username,
 		"totp_enabled":  user.TOTPEnabled,
 		"passkey_count": passkeyCount,
+		"role":          role,
 		"created_at":    user.CreatedAt,
 	})
 }

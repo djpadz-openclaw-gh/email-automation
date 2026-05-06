@@ -81,6 +81,17 @@ export interface AuthUser {
   id: number;
   username: string;
   totp_enabled: boolean;
+  role: string;
+}
+
+export interface Tenant {
+  id: number;
+  name: string;
+  slug: string;
+  api_key: string;
+  user_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ConfigResponse {
@@ -167,6 +178,11 @@ class ApiClient {
           this.onUnauthorized();
         }
       }
+
+      // For 403, include status in error message for downstream handling
+      if (res.status === 403) {
+        throw new Error(`403: ${body.error || 'Access denied'}`);
+      }
       
       throw new Error(body.error || `API error: ${res.status}`);
     }
@@ -207,6 +223,11 @@ class ApiClient {
           this.onUnauthorized();
         }
       }
+
+      // For 403, include status in error message for downstream handling
+      if (res.status === 403) {
+        throw new Error(`403: ${respBody.error || 'Access denied'}`);
+      }
       
       throw new Error(respBody.error || `API error: ${res.status}`);
     }
@@ -238,7 +259,7 @@ class ApiClient {
     await this.request('/auth/logout', { method: 'POST' });
   }
 
-  async getProfile(): Promise<{ id: number; username: string; totp_enabled: boolean; passkey_count: number; created_at: string }> {
+  async getProfile(): Promise<{ id: number; username: string; totp_enabled: boolean; passkey_count: number; role: string; created_at: string }> {
     return this.request('/auth/profile');
   }
 
@@ -416,6 +437,18 @@ class ApiClient {
   // --- Logs ---
   async listLogs(limit: number = 50): Promise<ExecutionLog[]> {
     return this.request<ExecutionLog[]>(`/api/v1/logs?limit=${limit}`);
+  }
+
+  // --- Admin ---
+  async adminListTenants(): Promise<Tenant[]> {
+    return this.request<Tenant[]>('/admin/tenants');
+  }
+
+  async adminCreateTenant(name: string, slug: string): Promise<Tenant> {
+    return this.request<Tenant>('/admin/tenants', {
+      method: 'POST',
+      body: JSON.stringify({ name, slug }),
+    });
   }
 }
 

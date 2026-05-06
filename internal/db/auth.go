@@ -12,20 +12,23 @@ import (
 // --- User operations ---
 
 func (db *DB) CreateUser(ctx context.Context, u *models.User) error {
+	if u.Role == "" {
+		u.Role = "user"
+	}
 	return db.Pool.QueryRow(ctx,
-		`INSERT INTO users (username, password_hash, totp_secret, totp_enabled)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO users (username, password_hash, totp_secret, totp_enabled, role)
+		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, created_at, updated_at`,
-		u.Username, u.PasswordHash, u.TOTPSecret, u.TOTPEnabled,
+		u.Username, u.PasswordHash, u.TOTPSecret, u.TOTPEnabled, u.Role,
 	).Scan(&u.ID, &u.CreatedAt, &u.UpdatedAt)
 }
 
 func (db *DB) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, totp_secret, totp_enabled, created_at, updated_at
+		`SELECT id, username, password_hash, totp_secret, totp_enabled, role, created_at, updated_at
 		 FROM users WHERE username = $1`, username,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Role, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -35,9 +38,9 @@ func (db *DB) GetUserByUsername(ctx context.Context, username string) (*models.U
 func (db *DB) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, username, password_hash, totp_secret, totp_enabled, created_at, updated_at
+		`SELECT id, username, password_hash, totp_secret, totp_enabled, role, created_at, updated_at
 		 FROM users WHERE id = $1`, id,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Role, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +155,11 @@ func (db *DB) GetAPIKeysByUserID(ctx context.Context, userID int64) ([]models.AP
 func (db *DB) GetUserByAPIKeyHash(ctx context.Context, keyHash string) (*models.User, error) {
 	u := &models.User{}
 	err := db.Pool.QueryRow(ctx,
-		`SELECT u.id, u.username, u.password_hash, u.totp_secret, u.totp_enabled, u.created_at, u.updated_at
+		`SELECT u.id, u.username, u.password_hash, u.totp_secret, u.totp_enabled, u.role, u.created_at, u.updated_at
 		 FROM users u
 		 JOIN api_keys ak ON ak.user_id = u.id
 		 WHERE ak.key_hash = $1`, keyHash,
-	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Role, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

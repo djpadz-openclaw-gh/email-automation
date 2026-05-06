@@ -126,9 +126,11 @@ func (s *Server) setupRoutes() {
 	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
 	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
 
-	// Admin endpoints (system API key)
+	// Admin endpoints (JWT + admin role required)
 	admin := s.app.Group("/admin")
-	admin.Use(adminAuth(s.config.APIKey))
+	admin.Use(middleware.JWTAuthMiddleware(s.db, s.jwt))
+	admin.Use(middleware.RequireAuth())
+	admin.Use(middleware.RequireAdmin(s.db))
 	tenantH := &handlers.TenantHandlers{DB: s.db}
 	admin.Get("/tenants", tenantH.ListTenants)
 	admin.Post("/tenants", tenantH.CreateTenant)
@@ -176,25 +178,3 @@ func errorHandler(c *fiber.Ctx, err error) error {
 	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 }
 
-func adminAuth(systemKey string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if systemKey == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "admin API not configured",
-			})
-		}
-		key := c.Get("X-API-Key")
-		if key == "" {
-			key = c.Get("Authorization")
-			if len(key) > 7 {
-				key = key[7:]
-			}
-		}
-		if key != systemKey {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid admin API key",
-			})
-		}
-		return c.Next()
-	}
-}

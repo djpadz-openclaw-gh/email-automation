@@ -9,26 +9,55 @@ import LogViewer from '@/components/LogViewer';
 import LoginForm from '@/components/LoginForm';
 import RegisterForm from '@/components/RegisterForm';
 import Settings from '@/components/Settings';
+import AdminPanel from '@/components/AdminPanel';
 
-type Tab = 'rules' | 'accounts' | 'logs' | 'settings';
+type Tab = 'rules' | 'accounts' | 'logs' | 'settings' | 'admin';
 type AuthView = 'login' | 'register';
 
 export default function Home() {
   const [token, setToken] = useState<string>('');
   const [username, setUsername] = useState<string>('');
+  const [userRole, setUserRole] = useState<string>('');
   const [authView, setAuthView] = useState<AuthView>('login');
-  const [activeTab, setActiveTab] = useState<Tab>('rules');
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('ea_active_tab');
+      if (stored && ['rules', 'accounts', 'logs', 'settings', 'admin'].includes(stored)) {
+        return stored as Tab;
+      }
+    }
+    return 'rules';
+  });
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [registrationEnabled, setRegistrationEnabled] = useState(true);
 
+  // Persist active tab to localStorage
+  useEffect(() => {
+    localStorage.setItem('ea_active_tab', activeTab);
+  }, [activeTab]);
+
+  // Reset admin tab if user is not admin
+  useEffect(() => {
+    if (activeTab === 'admin' && userRole && userRole !== 'admin') {
+      setActiveTab('rules');
+    }
+  }, [userRole, activeTab]);
+
   useEffect(() => {
     const stored = localStorage.getItem('ea_token');
     const storedUser = localStorage.getItem('ea_username');
+    const storedRole = localStorage.getItem('ea_role');
     if (stored) {
       setToken(stored);
       api.setToken(stored);
       if (storedUser) setUsername(storedUser);
+      if (storedRole) setUserRole(storedRole);
+      // Refresh role from profile in case it changed
+      api.getProfile().then(profile => {
+        setUserRole(profile.role);
+        localStorage.setItem('ea_role', profile.role);
+      }).catch(() => { /* ignore - will be caught by 401 handler */ });
     }
 
     // Handle 401 responses
@@ -49,9 +78,16 @@ export default function Home() {
   const handleLogin = (response: AuthResponse) => {
     setToken(response.token);
     setUsername(response.user.username);
+    setUserRole(response.user.role || '');
     api.setToken(response.token);
     localStorage.setItem('ea_token', response.token);
     localStorage.setItem('ea_username', response.user.username);
+    localStorage.setItem('ea_role', response.user.role || '');
+    // Also fetch profile to ensure we have the latest role
+    api.getProfile().then(profile => {
+      setUserRole(profile.role);
+      localStorage.setItem('ea_role', profile.role);
+    }).catch(() => { /* ignore */ });
   };
 
   const handleLogout = async () => {
@@ -60,9 +96,11 @@ export default function Home() {
     } catch { /* ignore */ }
     setToken('');
     setUsername('');
+    setUserRole('');
     api.setToken('');
     localStorage.removeItem('ea_token');
     localStorage.removeItem('ea_username');
+    localStorage.removeItem('ea_role');
   };
 
   if (!token) {
@@ -117,13 +155,14 @@ export default function Home() {
       </header>
 
       {/* Tabs */}
-      {activeTab !== 'settings' && (
+      {activeTab !== 'settings' && activeTab !== 'admin' && (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
           <nav className="flex gap-1 bg-white dark:bg-gray-900 rounded-lg p-1 shadow-sm border border-gray-200 dark:border-gray-800 w-fit" aria-label="Main navigation">
             {([
               { id: 'rules' as Tab, label: 'Rules', icon: '⚡' },
               { id: 'accounts' as Tab, label: 'Accounts', icon: '📬' },
               { id: 'logs' as Tab, label: 'Activity Log', icon: '📋' },
+              ...(userRole === 'admin' ? [{ id: 'admin' as Tab, label: 'Admin', icon: '🛡️' }] : []),
             ]).map((tab) => (
               <button
                 key={tab.id}
@@ -172,6 +211,7 @@ export default function Home() {
         {activeTab === 'accounts' && <AccountList />}
         {activeTab === 'logs' && <LogViewer />}
         {activeTab === 'settings' && <Settings onBack={() => setActiveTab('rules')} />}
+        {activeTab === 'admin' && userRole === 'admin' && <AdminPanel onBack={() => setActiveTab('rules')} />}
       </main>
     </div>
   );
