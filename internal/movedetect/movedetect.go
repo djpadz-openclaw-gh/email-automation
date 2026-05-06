@@ -340,33 +340,43 @@ func (w *moveWorker) scan(ctx context.Context) error {
 		return fmt.Errorf("list folders: %w", err)
 	}
 
-	// Search each folder for the missing UIDs (by Message-ID)
-	for _, uid := range missingUIDs {
-		info := missingMessages[uid]
-		if info == nil || info.MessageID == "" {
-			continue
+	// Build a set of Message-IDs we're looking for (batch approach)
+	messageIDSet := make(map[string]imap.UID) // messageID → UID
+	for uid, info := range missingMessages {
+		if info != nil && info.MessageID != "" {
+			messageIDSet[info.MessageID] = uid
 		}
+	}
 
-		destFolder := w.findMessageInFolders(client, info.MessageID, folders)
-		if destFolder.Name == "" {
-			// Message was deleted, not moved
-			logger.Debug().
-				Str("message_id", info.MessageID).
-				Msg("message disappeared from INBOX (likely deleted)")
-			continue
-		}
+	if len(messageIDSet) == 0 {
+		logger.Debug().Msg("no messages with Message-IDs to search for")
+		return nil
+	}
+
+	logger.Info().
+		Int("search_count", len(messageIDSet)).
+		Int("folder_count", len(folders)).
+		Msg("batch searching for moved messages across folders")
+
+	// Scan each folder once and match against all missing Message-IDs
+	foundDestinations := w.findMessagesInFoldersBatch(client, messageIDSet, folders)
+
+	// Process all found moves
+	for messageID, destFolder := range foundDestinations {
+		uid := messageIDSet[messageID]
+		info := missingMessages[uid]
 
 		// Skip rule creation if destination is a system trash/junk/archive folder (by IMAP attribute)
 		if isSkipFolder(destFolder.Name, destFolder.Attrs) {
 			logger.Info().
-				Str("message_id", info.MessageID).
+				Str("message_id", messageID).
 				Str("destination", destFolder.Name).
 				Msg("message moved to system trash/junk/archive folder (by attribute), skipping rule creation")
 			continue
 		}
 
 		logger.Info().
-			Str("message_id", info.MessageID).
+			Str("message_id", messageID).
 			Str("subject", info.Subject).
 			Str("sender", info.Sender).
 			Str("destination", destFolder.Name).
@@ -376,7 +386,7 @@ func (w *moveWorker) scan(ctx context.Context) error {
 		move := &models.DetectedMove{
 			AccountID:  w.account.ID,
 			MessageUID: fmt.Sprintf("%d", uid),
-			MessageID:  info.MessageID,
+			MessageID:  messageID,
 			Sender:     info.Sender,
 			Subject:    info.Subject,
 			FromFolder: "INBOX",
@@ -397,6 +407,15 @@ func (w *moveWorker) scan(ctx context.Context) error {
 
 		// Send Telegram notification
 		w.notifyMove(ctx, move, rule)
+	}
+
+	// Log messages that were deleted (not found in any folder)
+	for messageID := range messageIDSet {
+		if _, found := foundDestinations[messageID]; !found {
+			logger.Debug().
+				Str("message_id", messageID).
+				Msg("message disappeared from INBOX (likely deleted)")
+		}
 	}
 
 	return nil
@@ -515,6 +534,7 @@ func (w *moveWorker) listFolders(client *imapclient.Client) ([]folderInfo, error
 
 // findMessageInFolders searches for a message by Message-ID in the given folders.
 // Returns the folderInfo where found, or empty result if not found.
+// DEPRECATED: Use findMessagesInFoldersBatch for processing multiple messages.
 func (w *moveWorker) findMessageInFolders(client *imapclient.Client, messageID string, folders []folderInfo) folderInfo {
 	for _, folder := range folders {
 		selectCmd := client.Select(folder.Name, nil)
@@ -545,6 +565,85 @@ func (w *moveWorker) findMessageInFolders(client *imapclient.Client, messageID s
 	}
 
 	return folderInfo{}
+}
+
+// findMessagesInFoldersBatch searches for multiple messages across folders in batch.
+// Instead of searching each folder for each message individually (O(n*m)),
+// it scans each folder once and fetches all Message-IDs, then matches against
+// the target set in memory. This is O(n+m) where n=messages in folders, m=target messages.
+//
+// Returns a map of messageID → folderInfo for all found messages.
+func (w *moveWorker) findMessagesInFoldersBatch(client *imapclient.Client, messageIDSet map[string]imap.UID, folders []folderInfo) map[string]folderInfo {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Logger()
+
+	result := make(map[string]folderInfo)
+	remaining := len(messageIDSet)
+
+	for _, folder := range folders {
+		if remaining == 0 {
+			break // All messages found
+		}
+
+		selectCmd := client.Select(folder.Name, nil)
+		mbox, err := selectCmd.Wait()
+		if err != nil {
+			logger.Debug().Err(err).Str("folder", folder.Name).Msg("failed to select folder, skipping")
+			continue
+		}
+		if mbox.NumMessages == 0 {
+			continue
+		}
+
+		// Fetch Message-IDs from all messages in this folder
+		seqSet := imap.SeqSet{}
+		seqSet.AddRange(1, mbox.NumMessages)
+
+		fetchOptions := &imap.FetchOptions{
+			Envelope: true,
+		}
+
+		fetchCmd := client.Fetch(seqSet, fetchOptions)
+		for {
+			msg := fetchCmd.Next()
+			if msg == nil {
+				break
+			}
+
+			buf, err := msg.Collect()
+			if err != nil {
+				continue
+			}
+			if buf.Envelope == nil || buf.Envelope.MessageID == "" {
+				continue
+			}
+
+			// Check if this message's ID is in our target set
+			if _, wanted := messageIDSet[buf.Envelope.MessageID]; wanted {
+				// Only record the first folder we find it in
+				if _, alreadyFound := result[buf.Envelope.MessageID]; !alreadyFound {
+					result[buf.Envelope.MessageID] = folder
+					remaining--
+				}
+			}
+		}
+		fetchCmd.Close()
+
+		logger.Debug().
+			Str("folder", folder.Name).
+			Uint32("messages", mbox.NumMessages).
+			Int("found_so_far", len(result)).
+			Int("remaining", remaining).
+			Msg("scanned folder for batch move detection")
+	}
+
+	logger.Info().
+		Int("searched", len(messageIDSet)).
+		Int("found", len(result)).
+		Msg("batch move detection complete")
+
+	return result
 }
 
 // inferAndCreateRule analyzes the moved message and creates a rule.

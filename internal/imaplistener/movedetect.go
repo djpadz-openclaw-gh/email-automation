@@ -90,14 +90,24 @@ func (w *worker) mapSeqNumsToUIDs(seqNums []uint32) []imap.UID {
 }
 
 // handleExpungedMessages processes UIDs that were expunged from INBOX during IDLE.
-// For each expunged UID, it looks up the message details from message_locations
-// and searches other folders to detect where the message was moved.
+// It batch-processes all expunged messages: looks up their details, scans folders
+// once to find all destinations, then processes moves and creates rules.
 func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.Client, expungedUIDs []imap.UID) error {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
 		Logger()
 
 	logger.Info().Int("count", len(expungedUIDs)).Msg("processing expunged messages for move detection")
+
+	// Phase 1: Collect all expunged messages with their details from the database
+	type expungedMessage struct {
+		uid    imap.UID
+		uidStr string
+		loc    models.MessageLocation
+	}
+
+	var messages []expungedMessage
+	messageIDSet := make(map[string]bool) // simple set for batch lookup
 
 	for _, uid := range expungedUIDs {
 		uidStr := fmt.Sprintf("%d", uid)
@@ -121,18 +131,36 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 			continue
 		}
 
-		logger.Info().
-			Str("uid", uidStr).
-			Str("message_id", loc.MessageID).
-			Str("sender", loc.Sender).
-			Str("subject", loc.Subject).
-			Msg("looking for moved message in other folders")
+		msg := expungedMessage{uid: uid, uidStr: uidStr, loc: loc}
+		messages = append(messages, msg)
+		messageIDSet[loc.MessageID] = true
+	}
 
-		// Search other folders for this message by Message-ID
-		dest := w.findMessageInFolders(client, loc.MessageID)
-		if dest.Name == "" {
+	if len(messageIDSet) == 0 {
+		logger.Debug().Msg("no expunged messages with Message-IDs to search for")
+		return nil
+	}
+
+	logger.Info().
+		Int("searchable", len(messageIDSet)).
+		Msg("batch searching for moved messages across folders")
+
+	// Phase 2: List folders once and scan each folder for all missing Message-IDs
+	folders := w.listFolders(client)
+	foundDestinations := w.findMessagesInFoldersBatch(client, messageIDSet, folders)
+
+	logger.Info().
+		Int("searched", len(messageIDSet)).
+		Int("found", len(foundDestinations)).
+		Int("folders_scanned", len(folders)).
+		Msg("batch move detection complete")
+
+	// Phase 3: Process all found moves
+	for _, msg := range messages {
+		dest, found := foundDestinations[msg.loc.MessageID]
+		if !found {
 			logger.Debug().
-				Str("message_id", loc.MessageID).
+				Str("message_id", msg.loc.MessageID).
 				Msg("expunged message not found in other folders (likely deleted)")
 			continue
 		}
@@ -140,7 +168,7 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 		// Check if destination is a system trash/junk/archive folder by IMAP attributes
 		if isSkipFolder(dest.Name, dest.Attrs) {
 			logger.Info().
-				Str("message_id", loc.MessageID).
+				Str("message_id", msg.loc.MessageID).
 				Str("destination", dest.Name).
 				Msg("message moved to system trash/junk/archive folder (by attribute), skipping rule creation")
 			continue
@@ -148,19 +176,19 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 
 		destFolder := dest.Name
 		logger.Info().
-			Str("message_id", loc.MessageID).
-			Str("sender", loc.Sender).
-			Str("subject", loc.Subject).
+			Str("message_id", msg.loc.MessageID).
+			Str("sender", msg.loc.Sender).
+			Str("subject", msg.loc.Subject).
 			Str("destination", destFolder).
 			Msg("detected move via IDLE EXPUNGE: INBOX → " + destFolder)
 
 		// Record the move
 		move := &models.DetectedMove{
 			AccountID:  w.account.ID,
-			MessageUID: uidStr,
-			MessageID:  loc.MessageID,
-			Sender:     loc.Sender,
-			Subject:    loc.Subject,
+			MessageUID: msg.uidStr,
+			MessageID:  msg.loc.MessageID,
+			Sender:     msg.loc.Sender,
+			Subject:    msg.loc.Subject,
 			FromFolder: "INBOX",
 			ToFolder:   destFolder,
 		}
@@ -172,32 +200,32 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 
 		// Check if this move was performed by the rules engine (avoid self-detection)
 		// First check the rule_applied_moves table (service-agnostic, database-backed)
-		ruleApplied, err := w.db.IsRuleAppliedMove(ctx, w.account.ID, loc.MessageID)
+		ruleApplied, err := w.db.IsRuleAppliedMove(ctx, w.account.ID, msg.loc.MessageID)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to check rule_applied_moves")
 		}
 		if ruleApplied {
 			logger.Info().
-				Str("message_id", loc.MessageID).
+				Str("message_id", msg.loc.MessageID).
 				Str("destination", destFolder).
 				Msg("skipping rule creation: move was performed by a rule (rule_applied_moves)")
 			continue
 		}
 
 		// Fallback: check processed_messages table (legacy check)
-		processed, err := w.db.IsMessageProcessed(ctx, w.account.ID, uidStr)
+		processed, err := w.db.IsMessageProcessed(ctx, w.account.ID, msg.uidStr)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to check if message was processed by rules engine")
 		}
 		if processed {
 			logger.Debug().
-				Str("message_id", loc.MessageID).
+				Str("message_id", msg.loc.MessageID).
 				Msg("skipping rule creation: message was moved by rules engine")
 			continue
 		}
 
 		// Generate and create a rule based on heuristics
-		w.generateAndCreateRuleFromMove(ctx, loc, destFolder)
+		w.generateAndCreateRuleFromMove(ctx, msg.loc, destFolder)
 	}
 
 	return nil
@@ -209,15 +237,13 @@ type folderInfo struct {
 	Attrs []imap.MailboxAttr
 }
 
-// findMessageInFolders searches other folders for a message by Message-ID.
-// Returns the folder info (name + attributes) where found, or empty result if not found.
-func (w *worker) findMessageInFolders(client *imapclient.Client, messageID string) folderInfo {
+// listFolders returns all selectable mailbox info, excluding INBOX, Sent, Drafts,
+// and \Noselect mailboxes.
+func (w *worker) listFolders(client *imapclient.Client) []folderInfo {
 	logger := log.With().
 		Int64("account_id", w.account.ID).
-		Str("message_id", messageID).
 		Logger()
 
-	// List all folders with their attributes
 	listCmd := client.List("", "*", nil)
 	var folders []folderInfo
 	for {
@@ -262,38 +288,84 @@ func (w *worker) findMessageInFolders(client *imapclient.Client, messageID strin
 	}
 	if err := listCmd.Close(); err != nil {
 		logger.Warn().Err(err).Msg("failed to list folders")
-		return folderInfo{}
+		return nil
 	}
 
-	// Search for the message in each folder
+	return folders
+}
+
+// findMessagesInFoldersBatch searches for multiple messages across folders in batch.
+// Instead of searching each folder for each message individually (O(n*m)),
+// it scans each folder once and fetches all Message-IDs via envelope, then matches
+// against the target set in memory. This is O(total_messages_in_folders + target_count).
+//
+// messageIDSet is the set of Message-IDs to search for.
+// Returns a map of Message-ID → folderInfo for all found messages.
+func (w *worker) findMessagesInFoldersBatch(client *imapclient.Client, messageIDSet map[string]bool, folders []folderInfo) map[string]folderInfo {
+	logger := log.With().
+		Int64("account_id", w.account.ID).
+		Logger()
+
+	result := make(map[string]folderInfo)
+	remaining := len(messageIDSet)
+
 	for _, folder := range folders {
+		if remaining == 0 {
+			break // All messages found
+		}
+
 		selectCmd := client.Select(folder.Name, nil)
 		mbox, err := selectCmd.Wait()
 		if err != nil {
+			logger.Debug().Err(err).Str("folder", folder.Name).Msg("failed to select folder, skipping")
 			continue
 		}
 		if mbox.NumMessages == 0 {
 			continue
 		}
 
-		criteria := &imap.SearchCriteria{
-			Header: []imap.SearchCriteriaHeaderField{
-				{Key: "Message-ID", Value: messageID},
-			},
-		}
-		searchCmd := client.UIDSearch(criteria, nil)
-		searchData, err := searchCmd.Wait()
-		if err != nil {
-			continue
+		// Fetch Message-IDs from all messages in this folder via envelope
+		seqSet := imap.SeqSet{}
+		seqSet.AddRange(1, mbox.NumMessages)
+
+		fetchOptions := &imap.FetchOptions{
+			Envelope: true,
 		}
 
-		uids := searchData.AllUIDs()
-		if len(uids) > 0 {
-			return folder
+		fetchCmd := client.Fetch(seqSet, fetchOptions)
+		for {
+			msg := fetchCmd.Next()
+			if msg == nil {
+				break
+			}
+
+			buf, err := msg.Collect()
+			if err != nil {
+				continue
+			}
+			if buf.Envelope == nil || buf.Envelope.MessageID == "" {
+				continue
+			}
+
+			// Check if this message's ID is in our target set
+			if _, wanted := messageIDSet[buf.Envelope.MessageID]; wanted {
+				if _, alreadyFound := result[buf.Envelope.MessageID]; !alreadyFound {
+					result[buf.Envelope.MessageID] = folder
+					remaining--
+				}
+			}
 		}
+		fetchCmd.Close()
+
+		logger.Debug().
+			Str("folder", folder.Name).
+			Uint32("messages", mbox.NumMessages).
+			Int("found_so_far", len(result)).
+			Int("remaining", remaining).
+			Msg("scanned folder for batch move detection")
 	}
 
-	return folderInfo{}
+	return result
 }
 
 // generateAndCreateRuleFromMove creates an auto-learned rule based on the move.
