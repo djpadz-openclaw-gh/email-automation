@@ -936,3 +936,173 @@ func (db *DB) RotateEncryptionKeys(ctx context.Context) (int, error) {
 
 	return rotated, nil
 }
+
+// --- Email metadata operations ---
+
+// AttachMetadata attaches a key-value metadata tag to an email.
+// If the key already exists for this message, the value is updated.
+func (db *DB) AttachMetadata(ctx context.Context, tenantID int64, messageID, key, value string) (*models.MetadataRecord, error) {
+	m := &models.MetadataRecord{}
+	err := db.Pool.QueryRow(ctx,
+		`INSERT INTO email_metadata (tenant_id, message_id, key, value)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (tenant_id, message_id, key) DO UPDATE SET value = $4, updated_at = NOW()
+		 RETURNING id, tenant_id, message_id, key, value, created_at, updated_at`,
+		tenantID, messageID, key, value,
+	).Scan(&m.ID, &m.TenantID, &m.MessageID, &m.Key, &m.Value, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("attach metadata: %w", err)
+	}
+	return m, nil
+}
+
+// GetMetadataForMessage returns all metadata tags for a specific email.
+func (db *DB) GetMetadataForMessage(ctx context.Context, tenantID int64, messageID string) ([]models.MetadataRecord, error) {
+	rows, err := db.Pool.Query(ctx,
+		`SELECT id, tenant_id, message_id, key, value, created_at, updated_at
+		 FROM email_metadata WHERE tenant_id = $1 AND message_id = $2
+		 ORDER BY key`, tenantID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []models.MetadataRecord
+	for rows.Next() {
+		var r models.MetadataRecord
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.MessageID, &r.Key, &r.Value, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// UpdateMetadata updates the value of a specific metadata key for an email.
+func (db *DB) UpdateMetadata(ctx context.Context, tenantID int64, messageID, key, value string) (*models.MetadataRecord, error) {
+	m := &models.MetadataRecord{}
+	err := db.Pool.QueryRow(ctx,
+		`UPDATE email_metadata SET value = $1, updated_at = NOW()
+		 WHERE tenant_id = $2 AND message_id = $3 AND key = $4
+		 RETURNING id, tenant_id, message_id, key, value, created_at, updated_at`,
+		value, tenantID, messageID, key,
+	).Scan(&m.ID, &m.TenantID, &m.MessageID, &m.Key, &m.Value, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("update metadata: %w", err)
+	}
+	return m, nil
+}
+
+// RemoveMetadata removes a specific metadata key from an email.
+func (db *DB) RemoveMetadata(ctx context.Context, tenantID int64, messageID, key string) error {
+	tag, err := db.Pool.Exec(ctx,
+		`DELETE FROM email_metadata WHERE tenant_id = $1 AND message_id = $2 AND key = $3`,
+		tenantID, messageID, key)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("metadata key not found")
+	}
+	return nil
+}
+
+// QueryByMetadata returns message IDs that have a specific metadata key-value pair.
+// Optionally excludes a specific message ID from results.
+func (db *DB) QueryByMetadata(ctx context.Context, tenantID int64, key, value string, excludeMessageID string) ([]models.MetadataRecord, error) {
+	var query string
+	var args []interface{}
+
+	if excludeMessageID != "" {
+		query = `SELECT id, tenant_id, message_id, key, value, created_at, updated_at
+			 FROM email_metadata
+			 WHERE tenant_id = $1 AND key = $2 AND value = $3 AND message_id != $4
+			 ORDER BY created_at DESC`
+		args = []interface{}{tenantID, key, value, excludeMessageID}
+	} else {
+		query = `SELECT id, tenant_id, message_id, key, value, created_at, updated_at
+			 FROM email_metadata
+			 WHERE tenant_id = $1 AND key = $2 AND value = $3
+			 ORDER BY created_at DESC`
+		args = []interface{}{tenantID, key, value}
+	}
+
+	rows, err := db.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []models.MetadataRecord
+	for rows.Next() {
+		var r models.MetadataRecord
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.MessageID, &r.Key, &r.Value, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// BatchAttachMetadata attaches the same key-value metadata to multiple emails.
+func (db *DB) BatchAttachMetadata(ctx context.Context, tenantID int64, messageIDs []string, key, value string) ([]models.MetadataRecord, error) {
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var records []models.MetadataRecord
+	for _, msgID := range messageIDs {
+		var m models.MetadataRecord
+		err := tx.QueryRow(ctx,
+			`INSERT INTO email_metadata (tenant_id, message_id, key, value)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (tenant_id, message_id, key) DO UPDATE SET value = $4, updated_at = NOW()
+			 RETURNING id, tenant_id, message_id, key, value, created_at, updated_at`,
+			tenantID, msgID, key, value,
+		).Scan(&m.ID, &m.TenantID, &m.MessageID, &m.Key, &m.Value, &m.CreatedAt, &m.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("attach metadata to %s: %w", msgID, err)
+		}
+		records = append(records, m)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return records, nil
+}
+
+// BatchQueryMetadata queries multiple metadata keys at once for a tenant.
+func (db *DB) BatchQueryMetadata(ctx context.Context, tenantID int64, queries []struct{ Key, Value string }) (map[string][]models.MetadataRecord, error) {
+	results := make(map[string][]models.MetadataRecord)
+
+	for _, q := range queries {
+		rows, err := db.Pool.Query(ctx,
+			`SELECT id, tenant_id, message_id, key, value, created_at, updated_at
+			 FROM email_metadata
+			 WHERE tenant_id = $1 AND key = $2 AND value = $3
+			 ORDER BY created_at DESC`,
+			tenantID, q.Key, q.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		mapKey := q.Key + "=" + q.Value
+		for rows.Next() {
+			var r models.MetadataRecord
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.MessageID, &r.Key, &r.Value, &r.CreatedAt, &r.UpdatedAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			results[mapKey] = append(results[mapKey], r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return results, nil
+}

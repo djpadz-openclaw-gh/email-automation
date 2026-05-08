@@ -204,6 +204,16 @@ func (s *Server) setupRoutes() {
 	v1.Put("/accounts/:id", accountH.UpdateAccount)
 	v1.Delete("/accounts/:id", accountH.DeleteAccount)
 
+	// Email metadata
+	metadataH := &handlers.MetadataHandlers{DB: s.db}
+	v1.Post("/emails/:messageId/metadata", metadataH.AttachMetadata)
+	v1.Get("/emails/:messageId/metadata", metadataH.GetMetadata)
+	v1.Patch("/emails/:messageId/metadata/:key", metadataH.UpdateMetadata)
+	v1.Delete("/emails/:messageId/metadata/:key", metadataH.DeleteMetadata)
+	v1.Get("/metadata/search", metadataH.SearchByMetadata)
+	v1.Post("/metadata/batch-attach", metadataH.BatchAttachMetadata)
+	v1.Post("/metadata/batch-query", metadataH.BatchQueryMetadata)
+
 	// OAuth2
 	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)
 	oauth2H.Bus = s.bus

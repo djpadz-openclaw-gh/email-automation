@@ -161,6 +161,17 @@ type MessageLocation struct {
 	SeenAt     time.Time `json:"seen_at"`
 }
 
+// MetadataRecord represents a key-value tag attached to an email.
+type MetadataRecord struct {
+	ID        int64     `json:"id"`
+	TenantID  int64     `json:"tenant_id"`
+	MessageID string    `json:"message_id"`
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // DetectedMove records when a message moves between folders.
 type DetectedMove struct {
 	ID         int64      `json:"id"`
