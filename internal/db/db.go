@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,29 +159,37 @@ func (db *DB) CreateTenant(ctx context.Context, t *models.Tenant) error {
 
 func (db *DB) GetTenant(ctx context.Context, id int64) (*models.Tenant, error) {
 	t := &models.Tenant{}
+	var exemptFoldersJSON []byte
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants WHERE id = $1`, id,
-	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt)
+		`SELECT id, name, slug, api_key, exempt_folders, created_at, updated_at FROM tenants WHERE id = $1`, id,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &exemptFoldersJSON, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if exemptFoldersJSON != nil {
+		_ = json.Unmarshal(exemptFoldersJSON, &t.ExemptFolders)
 	}
 	return t, nil
 }
 
 func (db *DB) GetTenantByAPIKey(ctx context.Context, apiKey string) (*models.Tenant, error) {
 	t := &models.Tenant{}
+	var exemptFoldersJSON []byte
 	err := db.Pool.QueryRow(ctx,
-		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants WHERE api_key = $1`, apiKey,
-	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt)
+		`SELECT id, name, slug, api_key, exempt_folders, created_at, updated_at FROM tenants WHERE api_key = $1`, apiKey,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &exemptFoldersJSON, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if exemptFoldersJSON != nil {
+		_ = json.Unmarshal(exemptFoldersJSON, &t.ExemptFolders)
 	}
 	return t, nil
 }
 
 func (db *DB) ListTenants(ctx context.Context) ([]models.Tenant, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, name, slug, api_key, created_at, updated_at FROM tenants ORDER BY id`)
+		`SELECT id, name, slug, api_key, exempt_folders, created_at, updated_at FROM tenants ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -189,12 +198,105 @@ func (db *DB) ListTenants(ctx context.Context) ([]models.Tenant, error) {
 	var tenants []models.Tenant
 	for rows.Next() {
 		var t models.Tenant
-		if err := rows.Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		var exemptFoldersJSON []byte
+		if err := rows.Scan(&t.ID, &t.Name, &t.Slug, &t.APIKey, &exemptFoldersJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if exemptFoldersJSON != nil {
+			_ = json.Unmarshal(exemptFoldersJSON, &t.ExemptFolders)
 		}
 		tenants = append(tenants, t)
 	}
 	return tenants, rows.Err()
+}
+
+// --- Exempt folder operations ---
+
+// GetExemptFolders returns the list of exempt folders for a tenant.
+func (db *DB) GetExemptFolders(ctx context.Context, tenantID int64) ([]string, error) {
+	var exemptFoldersJSON []byte
+	err := db.Pool.QueryRow(ctx,
+		`SELECT exempt_folders FROM tenants WHERE id = $1`, tenantID,
+	).Scan(&exemptFoldersJSON)
+	if err != nil {
+		return nil, err
+	}
+	var folders []string
+	if exemptFoldersJSON != nil {
+		if err := json.Unmarshal(exemptFoldersJSON, &folders); err != nil {
+			return nil, fmt.Errorf("unmarshal exempt_folders: %w", err)
+		}
+	}
+	return folders, nil
+}
+
+// SetExemptFolders replaces the entire exempt folders list for a tenant.
+func (db *DB) SetExemptFolders(ctx context.Context, tenantID int64, folders []string) error {
+	foldersJSON, err := json.Marshal(folders)
+	if err != nil {
+		return fmt.Errorf("marshal exempt_folders: %w", err)
+	}
+	_, err = db.Pool.Exec(ctx,
+		`UPDATE tenants SET exempt_folders = $1, updated_at = NOW() WHERE id = $2`,
+		foldersJSON, tenantID)
+	return err
+}
+
+// AddExemptFolder adds a folder to the exempt list if not already present.
+func (db *DB) AddExemptFolder(ctx context.Context, tenantID int64, folder string) ([]string, error) {
+	folders, err := db.GetExemptFolders(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	// Check if already present (case-insensitive)
+	for _, f := range folders {
+		if strings.EqualFold(f, folder) {
+			return folders, nil // already exempt
+		}
+	}
+	folders = append(folders, folder)
+	if err := db.SetExemptFolders(ctx, tenantID, folders); err != nil {
+		return nil, err
+	}
+	return folders, nil
+}
+
+// RemoveExemptFolder removes a folder from the exempt list.
+func (db *DB) RemoveExemptFolder(ctx context.Context, tenantID int64, folder string) ([]string, error) {
+	folders, err := db.GetExemptFolders(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var updated []string
+	for _, f := range folders {
+		if !strings.EqualFold(f, folder) {
+			updated = append(updated, f)
+		}
+	}
+	if len(updated) == len(folders) {
+		return nil, fmt.Errorf("folder %q not found in exempt list", folder)
+	}
+	if updated == nil {
+		updated = []string{}
+	}
+	if err := db.SetExemptFolders(ctx, tenantID, updated); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// IsFolderExempt checks if a folder name is in the tenant's exempt list (case-insensitive).
+func (db *DB) IsFolderExempt(ctx context.Context, tenantID int64, folder string) (bool, error) {
+	folders, err := db.GetExemptFolders(ctx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range folders {
+		if strings.EqualFold(f, folder) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // --- Account operations ---

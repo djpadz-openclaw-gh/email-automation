@@ -6,12 +6,13 @@ import (
 
 // Tenant represents a top-level tenant (multi-tenant support).
 type Tenant struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Slug      string    `json:"slug"`
-	APIKey    string    `json:"api_key,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            int64     `json:"id"`
+	Name          string    `json:"name"`
+	Slug          string    `json:"slug"`
+	APIKey        string    `json:"api_key,omitempty"`
+	ExemptFolders []string  `json:"exempt_folders"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Account represents an email account belonging to a tenant.

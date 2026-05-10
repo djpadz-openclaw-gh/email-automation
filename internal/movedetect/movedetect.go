@@ -375,6 +375,18 @@ func (w *moveWorker) scan(ctx context.Context) error {
 			continue
 		}
 
+		// Skip rule creation if destination folder is in the tenant's exempt list
+		exempt, exemptErr := w.db.IsFolderExempt(ctx, w.account.TenantID, destFolder.Name)
+		if exemptErr != nil {
+			logger.Warn().Err(exemptErr).Str("folder", destFolder.Name).Msg("failed to check exempt folder status")
+		} else if exempt {
+			logger.Info().
+				Str("message_id", messageID).
+				Str("destination", destFolder.Name).
+				Msg("message moved to exempt folder, skipping rule creation")
+			continue
+		}
+
 		logger.Info().
 			Str("message_id", messageID).
 			Str("subject", info.Subject).

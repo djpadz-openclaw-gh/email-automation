@@ -540,6 +540,24 @@ class ApiClient {
     });
   }
 
+  // --- Settings: Exempt Folders ---
+  async listExemptFolders(): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders');
+  }
+
+  async addExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders', {
+      method: 'POST',
+      body: JSON.stringify({ folder }),
+    });
+  }
+
+  async removeExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>(`/api/v1/settings/exempt-folders/${encodeURIComponent(folder)}`, {
+      method: 'DELETE',
+    });
+  }
+
   // --- Admin (requires system API key) ---
   private adminKey: string = '';
 
