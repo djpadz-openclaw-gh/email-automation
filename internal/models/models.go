@@ -6,13 +6,12 @@ import (
 
 // Tenant represents a top-level tenant (multi-tenant support).
 type Tenant struct {
-	ID            int64     `json:"id"`
-	Name          string    `json:"name"`
-	Slug          string    `json:"slug"`
-	APIKey        string    `json:"api_key,omitempty"`
-	ExemptFolders []string  `json:"exempt_folders"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	APIKey    string    `json:"api_key,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Account represents an email account belonging to a tenant.
@@ -32,6 +31,7 @@ type Account struct {
 	OAuthTokenExpiry  *time.Time `json:"oauth_token_expiry,omitempty"`
 	OAuthProvider     string     `json:"oauth_provider,omitempty"` // microsoft365, gmail
 	Active            bool       `json:"active"`
+	ExemptFolders     []string   `json:"exempt_folders"`
 	LastSyncAt        *time.Time `json:"last_sync_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`

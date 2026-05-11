@@ -214,11 +214,11 @@ func (s *Server) setupRoutes() {
 	v1.Post("/metadata/batch-attach", metadataH.BatchAttachMetadata)
 	v1.Post("/metadata/batch-query", metadataH.BatchQueryMetadata)
 
-	// Settings: Exempt folders
+	// Settings: Exempt folders (per-account)
 	exemptH := &handlers.ExemptFoldersHandlers{DB: s.db}
-	v1.Get("/settings/exempt-folders", exemptH.ListExemptFolders)
-	v1.Post("/settings/exempt-folders", exemptH.AddExemptFolder)
-	v1.Delete("/settings/exempt-folders/:folder", exemptH.RemoveExemptFolder)
+	v1.Get("/accounts/:accountId/settings/exempt-folders", exemptH.ListExemptFolders)
+	v1.Post("/accounts/:accountId/settings/exempt-folders", exemptH.AddExemptFolder)
+	v1.Delete("/accounts/:accountId/settings/exempt-folders/:folder", exemptH.RemoveExemptFolder)
 
 	// OAuth2
 	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)

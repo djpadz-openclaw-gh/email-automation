@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import api, { PasskeyInfo, APIKeyInfo, TOTPSetupResponse, base64urlToBuffer } from '@/lib/api';
+import api, { PasskeyInfo, APIKeyInfo, TOTPSetupResponse, Account, base64urlToBuffer } from '@/lib/api';
 
 interface SettingsProps {
   onBack: () => void;
@@ -43,6 +43,8 @@ export default function Settings({ onBack }: SettingsProps) {
   const [exemptFolders, setExemptFolders] = useState<string[]>([]);
   const [exemptFoldersLoading, setExemptFoldersLoading] = useState(false);
   const [newExemptFolder, setNewExemptFolder] = useState('');
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
 
   useEffect(() => {
     loadProfile();
@@ -51,7 +53,7 @@ export default function Settings({ onBack }: SettingsProps) {
   useEffect(() => {
     if (activeSection === 'passkeys') loadPasskeys();
     if (activeSection === 'apikeys') loadAPIKeys();
-    if (activeSection === 'exempt-folders') loadExemptFolders();
+    if (activeSection === 'exempt-folders') loadAccounts();
   }, [activeSection]);
 
   const loadProfile = async () => {
@@ -81,10 +83,25 @@ export default function Settings({ onBack }: SettingsProps) {
     }
   };
 
+  const loadAccounts = async () => {
+    try {
+      const data = await api.listAccounts();
+      setAccounts(data || []);
+      if (data && data.length > 0 && !selectedAccountId) {
+        setSelectedAccountId(data[0].id);
+      }
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => {
+    if (selectedAccountId) loadExemptFolders();
+  }, [selectedAccountId]);
+
   const loadExemptFolders = async () => {
+    if (!selectedAccountId) return;
     try {
       setExemptFoldersLoading(true);
-      const data = await api.listExemptFolders();
+      const data = await api.listExemptFolders(selectedAccountId);
       setExemptFolders(data.exempt_folders || []);
     } catch { /* ignore */ } finally {
       setExemptFoldersLoading(false);
@@ -96,10 +113,14 @@ export default function Settings({ onBack }: SettingsProps) {
       setError('Folder name is required');
       return;
     }
+    if (!selectedAccountId) {
+      setError('No account selected');
+      return;
+    }
     try {
       setExemptFoldersLoading(true);
       setError('');
-      const data = await api.addExemptFolder(newExemptFolder.trim());
+      const data = await api.addExemptFolder(selectedAccountId, newExemptFolder.trim());
       setExemptFolders(data.exempt_folders || []);
       setNewExemptFolder('');
       setSuccess('Folder added to exempt list');
@@ -111,10 +132,14 @@ export default function Settings({ onBack }: SettingsProps) {
   };
 
   const handleRemoveExemptFolder = async (folder: string) => {
+    if (!selectedAccountId) {
+      setError('No account selected');
+      return;
+    }
     try {
       setExemptFoldersLoading(true);
       setError('');
-      const data = await api.removeExemptFolder(folder);
+      const data = await api.removeExemptFolder(selectedAccountId, folder);
       setExemptFolders(data.exempt_folders || []);
       setSuccess(`Removed "${folder}" from exempt list`);
     } catch (err: unknown) {
@@ -503,13 +528,34 @@ export default function Settings({ onBack }: SettingsProps) {
                 placeholder="Folder name"
                 className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
               />
-              <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+              <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim() || !selectedAccountId} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
                 + Add
               </button>
             </div>
           </div>
 
-          {exemptFoldersLoading ? (
+          {/* Account selector */}
+          {accounts.length > 0 && (
+            <div className="mb-4">
+              <label htmlFor="exempt-account" className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Account</label>
+              <select
+                id="exempt-account"
+                value={selectedAccountId || ''}
+                onChange={(e) => setSelectedAccountId(Number(e.target.value))}
+                className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.name || account.email}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {accounts.length === 0 ? (
+            <p className="text-sm text-gray-500 dark:text-gray-400">No accounts configured. Add an account first.</p>
+          ) : exemptFoldersLoading ? (
             <p className="text-sm text-gray-500">Loading...</p>
           ) : exemptFolders.length === 0 ? (
             <p className="text-sm text-gray-500 dark:text-gray-400">No exempt folders configured. Moves to any folder will trigger rule creation.</p>

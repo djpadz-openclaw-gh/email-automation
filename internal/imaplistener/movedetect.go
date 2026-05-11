@@ -174,6 +174,18 @@ func (w *worker) handleExpungedMessages(ctx context.Context, client *imapclient.
 			continue
 		}
 
+		// Check if destination folder is in the account's exempt list
+		exempt, exemptErr := w.db.IsFolderExempt(ctx, w.account.ID, dest.Name)
+		if exemptErr != nil {
+			logger.Warn().Err(exemptErr).Str("folder", dest.Name).Msg("failed to check exempt folder status")
+		} else if exempt {
+			logger.Info().
+				Str("message_id", msg.loc.MessageID).
+				Str("destination", dest.Name).
+				Msg("message moved to exempt folder, skipping rule creation")
+			continue
+		}
+
 		destFolder := dest.Name
 		logger.Info().
 			Str("message_id", msg.loc.MessageID).

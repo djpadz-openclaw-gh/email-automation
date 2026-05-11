@@ -564,20 +564,20 @@ class ApiClient {
     });
   }
 
-  // --- Settings: Exempt Folders ---
-  async listExemptFolders(): Promise<{ exempt_folders: string[] }> {
-    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders');
+  // --- Settings: Exempt Folders (per-account) ---
+  async listExemptFolders(accountId: number): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>(`/api/v1/accounts/${accountId}/settings/exempt-folders`);
   }
 
-  async addExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
-    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders', {
+  async addExemptFolder(accountId: number, folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>(`/api/v1/accounts/${accountId}/settings/exempt-folders`, {
       method: 'POST',
       body: JSON.stringify({ folder }),
     });
   }
 
-  async removeExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
-    return this.request<{ exempt_folders: string[] }>(`/api/v1/settings/exempt-folders/${encodeURIComponent(folder)}`, {
+  async removeExemptFolder(accountId: number, folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>(`/api/v1/accounts/${accountId}/settings/exempt-folders/${encodeURIComponent(folder)}`, {
       method: 'DELETE',
     });
   }

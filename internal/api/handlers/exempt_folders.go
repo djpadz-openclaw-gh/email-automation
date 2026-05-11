@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strconv"
+
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/djpadz/email-automation/internal/db"
@@ -18,10 +20,25 @@ func (h *ExemptFoldersHandlers) tenantID(c *fiber.Ctx) int64 {
 	return 0
 }
 
-// ListExemptFolders returns the current list of exempt folders.
-// GET /api/v1/settings/exempt-folders
+func (h *ExemptFoldersHandlers) accountID(c *fiber.Ctx) (int64, error) {
+	return strconv.ParseInt(c.Params("accountId"), 10, 64)
+}
+
+// ListExemptFolders returns the current list of exempt folders for an account.
+// GET /api/v1/accounts/:accountId/settings/exempt-folders
 func (h *ExemptFoldersHandlers) ListExemptFolders(c *fiber.Ctx) error {
-	folders, err := h.DB.GetExemptFolders(c.Context(), h.tenantID(c))
+	accountID, err := h.accountID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid account ID"})
+	}
+
+	// Verify the account belongs to this tenant
+	tenantID := h.tenantID(c)
+	if _, err := h.DB.GetAccount(c.Context(), tenantID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "account not found"})
+	}
+
+	folders, err := h.DB.GetExemptFolders(c.Context(), accountID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -31,9 +48,20 @@ func (h *ExemptFoldersHandlers) ListExemptFolders(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"exempt_folders": folders})
 }
 
-// AddExemptFolder adds a folder to the exempt list.
-// POST /api/v1/settings/exempt-folders
+// AddExemptFolder adds a folder to the exempt list for an account.
+// POST /api/v1/accounts/:accountId/settings/exempt-folders
 func (h *ExemptFoldersHandlers) AddExemptFolder(c *fiber.Ctx) error {
+	accountID, err := h.accountID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid account ID"})
+	}
+
+	// Verify the account belongs to this tenant
+	tenantID := h.tenantID(c)
+	if _, err := h.DB.GetAccount(c.Context(), tenantID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "account not found"})
+	}
+
 	var body struct {
 		Folder string `json:"folder"`
 	}
@@ -44,22 +72,33 @@ func (h *ExemptFoldersHandlers) AddExemptFolder(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "folder name is required"})
 	}
 
-	folders, err := h.DB.AddExemptFolder(c.Context(), h.tenantID(c), body.Folder)
+	folders, err := h.DB.AddExemptFolder(c.Context(), accountID, body.Folder)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"exempt_folders": folders})
 }
 
-// RemoveExemptFolder removes a folder from the exempt list.
-// DELETE /api/v1/settings/exempt-folders/:folder
+// RemoveExemptFolder removes a folder from the exempt list for an account.
+// DELETE /api/v1/accounts/:accountId/settings/exempt-folders/:folder
 func (h *ExemptFoldersHandlers) RemoveExemptFolder(c *fiber.Ctx) error {
+	accountID, err := h.accountID(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid account ID"})
+	}
+
+	// Verify the account belongs to this tenant
+	tenantID := h.tenantID(c)
+	if _, err := h.DB.GetAccount(c.Context(), tenantID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "account not found"})
+	}
+
 	folder := c.Params("folder")
 	if folder == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "folder name is required"})
 	}
 
-	folders, err := h.DB.RemoveExemptFolder(c.Context(), h.tenantID(c), folder)
+	folders, err := h.DB.RemoveExemptFolder(c.Context(), accountID, folder)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	}
