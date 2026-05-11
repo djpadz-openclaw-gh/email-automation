@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -31,6 +32,7 @@ func NewKiroHandlers(cfg *config.Config) *KiroHandlers {
 // englishToLuaRequest is the request body for English → Lua translation.
 type englishToLuaRequest struct {
 	Description string `json:"description"`
+	UsesAI      *bool  `json:"uses_ai,omitempty"`
 }
 
 // englishToLuaResponse is the response body for English → Lua translation.
@@ -41,6 +43,7 @@ type englishToLuaResponse struct {
 // luaToEnglishRequest is the request body for Lua → English translation.
 type luaToEnglishRequest struct {
 	LuaCode string `json:"lua_code"`
+	UsesAI  *bool  `json:"uses_ai,omitempty"`
 }
 
 // luaToEnglishResponse is the response body for Lua → English translation.
@@ -55,59 +58,116 @@ The Lua rules have access to these globals and helpers:
 - email.sender_address (string) — the sender's email address
 - email.sender_name (string) — the sender's display name
 - email.subject (string) — the email subject line
-- email.date (table) — the email date
+- email.body_preview (string) — first ~200 chars of the email body
+- email.date (string) — the email date in RFC3339 format
+- email.age_seconds (number) — how old the email is in seconds
 - email.has_attachments (boolean) — whether the email has attachments
-- email.has_images (boolean) — whether the email has image attachments
-- email.ocr_text (string) — extracted text from image attachments via OCR
-- email.flags (table) — IMAP flags on the message
+- email.attachment_names (table) — list of attachment filenames
+- email.attachment_types (table) — list of attachment MIME types
+- email.recipients (table) — list of recipient addresses
+- email.headers (table) — email headers as key-value pairs
+- email.folder (string) — current IMAP folder
+
+Action functions (call one to set result):
+- skip() — rule doesn't apply
+- keep(reason) — keep in inbox, stop rule chain
+- move(folder, reason) — move to a folder
+- archive(reason) — archive the email
+- delete(reason) — delete the email
+- notify(message, reason) — send a notification
+- flag(flag_name, reason) — set an IMAP flag
+- move_after(folder, delay_secs, reason) — move after a delay
+- delete_after(delay_secs, reason) — delete after a delay
+- schedule(delay_secs, function) — schedule any action to execute after a delay
+  The function should call exactly one action (move, delete, archive, etc.)
+  Example: schedule(3 * 60 * 60, function() move("@Archive") end)
 
 Helper functions:
-- skip() — return this to skip the email (rule doesn't apply)
-- keep(reason) — return this to keep the email in the inbox
-- move(folder, reason) — return this to move the email to a folder
-- archive(reason) — return this to archive the email
-- delete_msg(reason) — return this to delete the email
-- flag(name, reason) — return this to flag the email
-- older_than_hours(n) — returns true if the email is older than n hours
-- contains_any(str, patterns) — returns true if str contains any of the patterns
-- has_ics() — returns true if the email has a .ics calendar attachment
+- contains(haystack, needle) — case-insensitive substring match
+- contains_any(haystack, {needles}) — case-insensitive, matches any
+- starts_with(text, prefix) — case-insensitive prefix match
+- ends_with(text, suffix) — case-insensitive suffix match
+- domain_of(email_addr) — extract domain from email address
+- older_than(secs), older_than_hours(h), older_than_days(d) — age checks
+- has_ics() — has calendar attachment
+- has_attachment_type(mime) — has attachment of given MIME type
+- is_reply() — subject starts with Re:/Fwd:/etc.
+- now_hour() — current hour in UTC
 
-Semantic analysis functions (for complex/subjective criteria):
-- kiro.classify(email, question) — Ask AI to classify the email based on a semantic question. Returns true/false. Use this for:
-  * Image content analysis (e.g., "Does this image contain McAfee or Geek Squad text?")
-  * Subjective criteria (e.g., "Is this email actionable?")
-  * Fraud detection (e.g., "Does this look like a phishing email?")
-  * Complex patterns that can't be matched with simple string matching
-- kiro.is_actionable(email) — Returns true if the email requires action
-- kiro.is_fake_invoice(email) — Returns true if the email appears to be a fake invoice (uses OCR text)
+Kiro AI functions (for SEMANTIC evaluation only):
+- kiro.classify(email, question) — ask AI a yes/no question about the email
+  VISION CAPABLE: When the email has image attachments, kiro.classify() automatically
+  sends the actual images to the AI for visual analysis. It can see logos, layouts,
+  text rendered in images, and visual patterns — not just OCR text.
+- kiro.is_actionable(email) — ask AI if the email requires action
+- kiro.is_fake_invoice(email) — ask AI if an invoice/payment email looks fraudulent (uses vision + OCR)
+
+Additional email fields for images and OCR:
+- email.ocr_text (string) — text extracted from image attachments via OCR (always available when images are present)
+- email.has_images (boolean) — whether the email has image attachments
+- Image attachments are automatically passed to kiro.classify() and kiro.is_fake_invoice() for vision analysis
+
+IMPORTANT: kiro.classify() now has VISION capabilities. When an email has image attachments,
+the actual images are sent to the AI alongside the email text. This means kiro.classify() can:
+- See what an image looks like (logos, layouts, colors, formatting)
+- Read text rendered in images (even if OCR missed it)
+- Detect visual patterns (fake invoices, phishing screenshots, scam receipts)
+- Analyze image quality and authenticity cues
+This is MORE POWERFUL than just OCR text — it's full visual understanding.
+
+IMPORTANT GUIDELINES FOR CHOOSING BETWEEN SIMPLE PATTERNS AND KIRO:
+
+1. PREFER simple string matching for concrete, deterministic criteria:
+   - Matching specific senders, domains, subjects → use contains(), domain_of(), etc.
+   - "emails from John" → sender_address or sender_name matching
+   - "emails about shipping" → contains(subject, "shipping")
+   - "newsletters" → contains(sender, "newsletter") or domain matching
+
+2. Use kiro.classify() ONLY when the request is inherently semantic/subjective:
+   - "important emails" → kiro.classify(email, "Is this email important or urgent?")
+   - "invoices from vendors" → kiro.classify(email, "Is this an invoice from a vendor?")
+   - "spam that got through" → kiro.classify(email, "Does this look like spam?")
+   - "emails that need a reply" → kiro.is_actionable(email)
+
+3. Use kiro.classify() for IMAGE-BASED detection:
+   When the user mentions "picture of", "image of", "image contains", "image looks like",
+   "screenshot of", "image with text", "photo of", or any reference to visual content in
+   attachments, this is a signal to use kiro.classify() — NOT filename/MIME type checking.
+   kiro.classify() has VISION capabilities — when images are attached, it sends the actual
+   images to the AI for visual analysis. It can see logos, layouts, text in images, and
+   visual patterns. Ask it about the image content:
+   - "image that looks like a McAfee invoice" → kiro.classify(email, "Does this email have an image that looks like a McAfee or Geek Squad invoice?")
+   - "screenshot of a bank login page" → kiro.classify(email, "Does this email contain an image that appears to be a bank login page?")
+   - "picture of a receipt" → kiro.classify(email, "Does this email have an image that looks like a receipt?")
+   - "image with the words 'You owe'" → kiro.classify(email, "Does this email have an image containing the text 'You owe'?")
+   You can also check email.has_images first as a fast pre-filter before calling kiro.classify().
+   You can also check email.ocr_text directly with contains() for exact text matches in images.
+
+4. Use kiro.is_actionable() for action/triage questions:
+   - "actionable emails" → kiro.is_actionable(email)
+   - "emails I need to respond to" → kiro.is_actionable(email)
+
+5. Use kiro.is_fake_invoice() for fraud detection:
+   - "suspicious invoices" → kiro.is_fake_invoice(email)
+   - "fake payment requests" → kiro.is_fake_invoice(email)
 
 Rules should:
 1. Start with a comment block describing the rule
-2. Extract relevant email fields into local variables
-3. Check conditions and return skip() if the rule doesn't apply
-4. Return an action (move, archive, delete_msg, keep, flag) with a reason string
+2. Use simple pattern matching first (fast, no API calls)
+3. Only fall back to kiro.classify() when the criteria cannot be expressed as string matching
+4. Return skip() if the rule doesn't apply
+5. Return an action with a reason string
 
-Example rule:
+Example 1 - Simple pattern (NO kiro needed):
 ` + "```lua" + `
--- Rule: Amazon
+-- Rule: Amazon Orders
 -- Move Amazon order/shipping emails older than 24 hours to @Amazon.
 
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-local domains = { "amazon.com", "marketplace.amazon.com" }
-local keywords = { "your order", "has shipped", "delivered" }
-
-local sender_match = false
-for _, domain in ipairs(domains) do
-    if sender:find(domain, 1, true) then
-        sender_match = true
-        break
-    end
-end
-
-if not sender_match then return skip() end
-if not contains_any(subject, keywords) then return skip() end
+if not ends_with(sender, "amazon.com") then return skip() end
+if not contains_any(subject, {"your order", "has shipped", "delivered"}) then return skip() end
 if not older_than_hours(24) then
     return keep("Amazon order email, keeping until 24h old")
 end
@@ -115,34 +175,145 @@ end
 return move("@Amazon", "Amazon order/shipping email filed")
 ` + "```" + `
 
-IMPORTANT: For image-based rules (when user mentions "picture of", "image contains", "looks like", etc.), use kiro.classify(email, "question") to analyze image content via OCR.
-
-Example for image-based rule:
+Example 2 - Semantic evaluation (kiro needed):
 ` + "```lua" + `
--- Rule: McAfee/Geek Squad Scam Detection
--- Move emails with images containing McAfee or Geek Squad text to Junk
+-- Rule: Vendor Invoices
+-- Detect invoices from vendors and move to @Invoices.
+
+if not kiro.classify(email, "Is this an invoice or payment request from a vendor or supplier?") then
+    return skip()
+end
+
+return move("@Invoices", "Vendor invoice detected by AI")
+` + "```" + `
+
+Example 3 - Combined approach:
+` + "```lua" + `
+-- Rule: Actionable emails from team
+-- Keep actionable emails from the team, archive the rest.
+
+local sender = email.sender_address:lower()
+if not ends_with(sender, "@mycompany.com") then return skip() end
+
+if kiro.is_actionable(email) then
+    return keep("Actionable email from team member")
+end
+
+return archive("Non-actionable team email")
+` + "```" + `
+
+Example 4 - Image-based detection (kiro + OCR):
+` + "```lua" + `
+-- Rule: Fake McAfee/Geek Squad Invoices
+-- Flag emails with images that look like McAfee or Geek Squad invoices as junk.
 
 if not email.has_images then return skip() end
 
-if kiro.classify(email, "Does this image contain McAfee or Geek Squad text?") then
-    return move("Junk", "Image contains McAfee or Geek Squad scam")
+if kiro.classify(email, "Does this email have an image containing McAfee or Geek Squad invoice or renewal text?") then
+    return move("Junk", "Image contains McAfee/Geek Squad invoice text (likely scam)")
 end
 
 return skip()
 ` + "```" + `
 
-Key pattern: Check for images first (early return if none), then call kiro.classify(), then explicit return skip() at end.
+Example 5 - Image OCR with direct text matching:
+` + "```lua" + `
+-- Rule: Bank Login Screenshots
+-- Flag emails containing screenshots of bank login pages.
+
+if not email.has_images then return skip() end
+
+-- Quick check: does OCR text mention banking keywords?
+local ocr = email.ocr_text:lower()
+if not contains_any(ocr, {"login", "sign in", "password", "account"}) then return skip() end
+
+-- Semantic check: does it actually look like a bank login page?
+if kiro.classify(email, "Does this email contain an image that appears to be a bank or financial login page?") then
+    return move("Junk", "Image appears to be a bank login page screenshot (phishing)")
+end
+
+return skip()
+` + "```" + `
+
+Example 6 - Image content with OCR text matching:
+` + "```lua" + `
+-- Rule: Receipt Images
+-- Move emails with receipt images to @Receipts.
+
+if not email.has_images then return skip() end
+
+if kiro.classify(email, "Does this email have an image that looks like a purchase receipt or order confirmation?") then
+    return move("@Receipts", "Image contains receipt detected by AI")
+end
+
+return skip()
+` + "```" + `
+
+Example 7 - Scheduled action with delay:
+` + "```lua" + `
+-- Rule: Archive newsletters after 3 hours
+-- Keep newsletter emails for 3 hours, then move to @Archive.
+
+local sender = email.sender_address:lower()
+if not contains_any(sender, {"newsletter", "digest", "weekly"}) then return skip() end
+
+schedule(3 * 60 * 60, function()
+    move("@Archive")
+end)
+` + "```" + `
+
+Example 8 - Delete after delay:
+` + "```lua" + `
+-- Rule: Auto-delete promotional emails after 24 hours
+-- Delete promotional emails after 1 day.
+
+local subject = email.subject:lower()
+if not contains_any(subject, {"sale", "% off", "limited time", "unsubscribe"}) then return skip() end
+
+schedule(24 * 60 * 60, function()
+    delete()
+end)
+` + "```" + `
+
+When the user mentions time-based conditions like "after X hours", "in Y days", "after Z minutes",
+generate schedule() calls:
+- "move to @Archive after 3 hours" → schedule(3 * 60 * 60, function() move("@Archive") end)
+- "delete after 1 day" → schedule(24 * 60 * 60, function() delete() end)
+- "archive in 30 minutes" → schedule(30 * 60, function() archive() end)
+- "flag as important after 2 hours" → schedule(2 * 60 * 60, function() flag("important") end)
+
+Prefer schedule() over move_after()/delete_after() as it's more flexible and readable.
 
 Respond with ONLY the Lua code. No markdown fences, no explanation, just the raw Lua code.`
 
-const luaToEnglishSystemPrompt = `You are an expert at reading Lua email filtering rules and explaining them in plain English.
+const luaToEnglishSystemPrompt = `You are an expert at reading Lua email filtering rules and describing their mechanics in plain English.
 
-Given a Lua email rule, describe what it does in clear, concise English. Focus on:
-1. What emails the rule matches (sender, subject, conditions)
-2. What action it takes (move, archive, delete, keep, flag)
-3. Any timing conditions (e.g., "older than 24 hours")
+Given a Lua email rule, describe WHAT the code does — the literal logic flow and actions. Read like code comments: factual, mechanical, literal.
 
-Be concise but complete. Write a single paragraph or a few short sentences. Do not include any code in your response.`
+Rules:
+1. Describe the conditions checked (if/then/else, comparisons, function calls)
+2. Describe the actions taken (move, delete, keep, archive, flag, notify, schedule)
+3. Describe timing values literally (e.g., "if older than 3 hours", "schedules a move after 86400 seconds")
+4. For kiro.classify() calls, state the question being asked — do not interpret what it means
+5. Do NOT speculate about intent or purpose (no "probably because", "to clean up", "so that")
+6. Do NOT add interpretive sentences about why the rule exists
+7. Do NOT explain the reasoning behind conditions or actions
+8. Stick to the WHAT, never the WHY
+
+Format: Write short, factual sentences describing the logic flow. Use "If... then..." structure to mirror the code's conditionals.
+
+Examples of GOOD output:
+- "If the sender domain is amazon.com and the subject contains 'your order' or 'has shipped', and the email is older than 24 hours, move it to @Amazon. Otherwise, keep it."
+- "If the email is less than 3 hours old, keep it. Otherwise, move it to @3DayTrash."
+- "If the sender address does not end with @mycompany.com, skip. Otherwise, call kiro.is_actionable(). If actionable, keep. If not, archive."
+- "Skip if no image attachments. Call kiro.classify() asking 'Does this email have an image containing McAfee or Geek Squad invoice text?'. If yes, move to Junk."
+
+Examples of BAD output (do NOT write like this):
+- "Keep Scripps appointment emails for 3 hours (probably because they need time to review), then move to trash (to clean up old messages)." ← speculates about reasons
+- "Archives newsletters to reduce inbox clutter." ← interprets purpose
+- "Moves old Amazon emails to keep the inbox tidy." ← adds intent
+
+Be concise but complete. Do not include any code in your response.`
 
 // anthropicRequest is the request body for the Anthropic Messages API.
 type anthropicRequest struct {
@@ -168,6 +339,73 @@ type anthropicResponse struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// stripMarkdownCodeBlock removes markdown code fences (```lua ... ``` or ``` ... ```)
+// from text that the AI may wrap its response in despite being told not to.
+func stripMarkdownCodeBlock(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	// Check if the text starts with a code fence
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 2 {
+		return trimmed
+	}
+
+	firstLine := strings.TrimSpace(lines[0])
+	if !strings.HasPrefix(firstLine, "```") {
+		return trimmed
+	}
+
+	// Find the closing fence
+	lastIdx := -1
+	for i := len(lines) - 1; i > 0; i-- {
+		if strings.TrimSpace(lines[i]) == "```" {
+			lastIdx = i
+			break
+		}
+	}
+
+	if lastIdx <= 0 {
+		// No closing fence found — strip just the opening fence line
+		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+
+	// Return everything between the fences
+	return strings.TrimSpace(strings.Join(lines[1:lastIdx], "\n"))
+}
+
+// looksLikeLua checks whether text appears to be valid Lua code by inspecting
+// the first non-empty line for common Lua tokens.
+func looksLikeLua(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+
+	// Lua code typically starts with one of these tokens.
+	prefixes := []string{
+		"--",       // comment
+		"local ",   // local declaration
+		"if ",      // conditional
+		"function ", // function definition
+		"for ",     // for loop
+		"while ",   // while loop
+		"repeat",   // repeat-until
+		"return ",  // return statement
+		"do",       // do block
+	}
+
+	lower := strings.ToLower(trimmed)
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // callKiroAPI sends a prompt to the Kiro/Anthropic API and returns the response text.
@@ -242,6 +480,17 @@ func (h *KiroHandlers) callKiroAPI(systemPrompt, userMessage string) (string, er
 
 }
 
+// aiConstraint returns the AI usage constraint string to append to prompts.
+func aiConstraint(usesAI *bool) string {
+	if usesAI == nil {
+		return ""
+	}
+	if *usesAI {
+		return "\n\nYou may use AI when writing this script."
+	}
+	return "\n\nYou may NOT use AI when writing this script."
+}
+
 // TranslateEnglishToLua handles POST /api/kiro/translate/english-to-lua
 func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 	var req englishToLuaRequest
@@ -255,78 +504,27 @@ func (h *KiroHandlers) TranslateEnglishToLua(c *fiber.Ctx) error {
 
 	log.Info().Str("description", req.Description).Msg("translating English to Lua")
 
-	luaCode, err := h.callKiroAPI(englishToLuaSystemPrompt, req.Description)
+	prompt := englishToLuaSystemPrompt + aiConstraint(req.UsesAI)
+	luaCode, err := h.callKiroAPI(prompt, req.Description)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to translate English to Lua")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
 	}
 
+	// Strip markdown code fences that the AI may include despite instructions
+	luaCode = stripMarkdownCodeBlock(luaCode)
+
+	// If the response doesn't look like Lua code, return it as an error
+	// so the frontend can show a banner instead of replacing the editor content.
+	if !looksLikeLua(luaCode) {
+		return c.JSON(fiber.Map{
+			"error":    "The AI response was not valid Lua code",
+			"message":  luaCode,
+			"lua_code": "",
+		})
+	}
+
 	return c.JSON(englishToLuaResponse{LuaCode: luaCode})
-}
-
-// KiroProxyRequest is the request body for the generic Kiro proxy endpoint.
-type KiroProxyRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	Messages  []anthropicMessage `json:"messages"`
-}
-
-// KiroProxy handles POST /api/kiro (generic proxy to Kiro gateway)
-func (h *KiroHandlers) KiroProxy(c *fiber.Ctx) error {
-	var req KiroProxyRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
-	}
-
-	if req.Model == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "model is required"})
-	}
-
-	if len(req.Messages) == 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "messages are required"})
-	}
-
-	reqBody := anthropicRequest{
-		Model:     req.Model,
-		MaxTokens: req.MaxTokens,
-		Messages:  req.Messages,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to marshal request"})
-	}
-
-	req2, err := http.NewRequest("POST", h.Config.KiroAPIURL, bytes.NewReader(jsonBody))
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create request"})
-	}
-
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("x-api-key", h.Config.KiroAPIKey)
-	req2.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := h.client.Do(req2)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API request failed"})
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read response"})
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Error().
-			Int("status", resp.StatusCode).
-			Str("body", string(body)).
-			Msg("Kiro API returned non-200 status")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API returned status " + fmt.Sprint(resp.StatusCode)})
-	}
-
-	// Return the raw response from Kiro API
-	return c.Status(fiber.StatusOK).Send(body)
 }
 
 // TranslateLuaToEnglish handles POST /api/kiro/translate/lua-to-english
@@ -342,7 +540,8 @@ func (h *KiroHandlers) TranslateLuaToEnglish(c *fiber.Ctx) error {
 
 	log.Info().Msg("translating Lua to English")
 
-	description, err := h.callKiroAPI(luaToEnglishSystemPrompt, req.LuaCode)
+	prompt := luaToEnglishSystemPrompt + aiConstraint(req.UsesAI)
+	description, err := h.callKiroAPI(prompt, req.LuaCode)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to translate Lua to English")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "translation failed: " + err.Error()})
@@ -420,12 +619,21 @@ func (h *KiroHandlers) Proxy(c *fiber.Ctx) error {
 	// Find the text block, skipping thinking blocks
 	for _, block := range apiResp.Content {
 		if block.Type == "text" {
-			// Return a clean response with only the text content block
+			// Strip markdown code fences that the AI may include despite instructions
+			text := stripMarkdownCodeBlock(block.Text)
+			// If the response doesn't look like Lua, return an error field
+			// so the frontend can show a banner instead of updating the editor.
+			if !looksLikeLua(text) {
+				return c.JSON(fiber.Map{
+					"error":   "The AI response was not valid Lua code",
+					"message": text,
+				})
+			}
 			return c.JSON(fiber.Map{
 				"content": []fiber.Map{
 					{
 						"type": "text",
-						"text": block.Text,
+						"text": text,
 					},
 				},
 			})

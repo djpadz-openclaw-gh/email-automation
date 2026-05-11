@@ -1,14 +1,17 @@
-// Use the Next.js API route proxy to avoid exposing the Kiro API key client-side
-const KIRO_API_URL =
-  process.env.NEXT_PUBLIC_KIRO_API_URL || '/api/kiro';
+// Translation endpoints on the Go backend API server.
+// The ingress routes /api/* to the Go backend, so these hit the dedicated
+// translation handlers (not the generic Anthropic proxy).
+const TRANSLATE_BASE =
+  process.env.NEXT_PUBLIC_TRANSLATE_API_URL || '/api/kiro/translate';
 
-interface KiroMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-interface KiroResponse {
-  content: Array<{ type: string; text: string }>;
+// Custom error class for non-Lua AI responses
+export class KiroTranslationError extends Error {
+  public aiMessage: string;
+  constructor(error: string, aiMessage: string) {
+    super(error);
+    this.name = 'KiroTranslationError';
+    this.aiMessage = aiMessage;
+  }
 }
 
 // Translation cache to minimize API calls
@@ -39,100 +42,43 @@ function setCache(key: string, result: string): void {
   translationCache.set(key, { result, timestamp: Date.now() });
 }
 
-async function callKiro(messages: KiroMessage[]): Promise<string> {
-  const res = await fetch(KIRO_API_URL, {
+/**
+ * Translate natural language description to Lua rule code.
+ * Uses the dedicated /api/kiro/translate/english-to-lua endpoint on the Go backend,
+ * which has proper system prompts and response validation built in.
+ */
+export async function naturalLanguageToLua(description: string, usesAi?: boolean): Promise<string> {
+  const cacheKey = getCacheKey('nl2lua', `${description}:ai=${usesAi}`);
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const body: Record<string, unknown> = { description };
+  if (usesAi !== undefined) {
+    body.uses_ai = usesAi;
+  }
+
+  const res = await fetch(`${TRANSLATE_BASE}/english-to-lua`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-haiku-4.5',
-      max_tokens: 2048,
-      messages,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     const body = await res.text().catch(() => res.statusText);
-    throw new Error(`Kiro API error ${res.status}: ${body}`);
+    throw new Error(`Translation API error ${res.status}: ${body}`);
   }
 
-  const data: KiroResponse = await res.json();
-  if (data.content && data.content.length > 0) {
-    return data.content[0].text;
+  const data = await res.json();
+
+  // The backend returns { error, message } when the AI response wasn't valid Lua
+  if (data.error) {
+    throw new KiroTranslationError(data.error, data.message || '');
   }
-  throw new Error('Empty response from Kiro API');
-}
 
-const SYSTEM_CONTEXT = `You are an expert at the email automation Lua rule DSL. Rules have access to:
-
-Email context (via "email" table):
-- email.subject, email.sender_address, email.sender_name, email.sender (alias)
-- email.recipients (table), email.date, email.age_seconds
-- email.body_preview, email.has_attachments, email.attachment_names, email.attachment_types
-- email.has_images (boolean) - whether email has image attachments
-- email.ocr_text (string) - extracted text from image attachments via OCR
-- email.headers (table), email.folder, email.message_id
-
-Action functions (call one to set result):
-- skip() - rule doesn't apply
-- delete(reason?) - delete message
-- archive(reason?) - archive message
-- move(folder, reason?) - move to folder
-- keep(reason?) - keep in inbox, stop chain
-- notify(message, reason?) - send notification
-- defer_action(action, target, delay_secs, reason?)
-- move_after(folder, delay_secs, reason?)
-- delete_after(delay_secs, reason?)
-
-Helper functions:
-- contains(haystack, needle) - case-insensitive
-- contains_any(haystack, {needles}) - case-insensitive
-- starts_with(text, prefix), ends_with(text, suffix)
-- domain_of(email_addr), older_than(secs), older_than_hours(h), older_than_days(d)
-- has_ics(), has_attachment_type(mime), is_reply(), now_hour()
-
-Semantic analysis functions (for complex/subjective criteria):
-- kiro.classify(email, question) - Ask AI to classify email based on semantic question. Returns true/false. Use for:
-  * Image content analysis (e.g., "Does this image contain McAfee or Geek Squad text?")
-  * Subjective criteria (e.g., "Is this email actionable?")
-  * Fraud detection (e.g., "Does this look like a phishing email?")
-  * Complex patterns that can't be matched with simple string matching
-- kiro.is_actionable(email) - Returns true if email requires action
-- kiro.is_fake_invoice(email) - Returns true if email appears to be fake invoice (uses OCR text)
-
-IMPORTANT: For image-based rules (when user mentions "picture of", "image contains", "looks like", etc.), use kiro.classify(email, "question") to analyze image content via OCR. Example: "If email has image of McAfee invoice" → if kiro.classify(email, "Does this image contain McAfee text?") then move("Junk") end
-
-Lua standard library: string, table, math (safe subset only).`;
-
-/**
- * Translate natural language description to Lua rule code.
- */
-export async function naturalLanguageToLua(description: string): Promise<string> {
-  const cacheKey = getCacheKey('nl2lua', description);
-  const cached = getCached(cacheKey);
-  if (cached) return cached;
-
-  const result = await callKiro([
-    {
-      role: 'user',
-      content: `${SYSTEM_CONTEXT}
-
-Convert this natural language rule description into Lua code for the email automation engine. Return ONLY the Lua code, no markdown fences, no explanation.
-
-Description: ${description}`,
-    },
-  ]);
-
-  // Strip markdown code fences if present
-  let code = result.trim();
-  if (code.startsWith('```lua')) {
-    code = code.slice(6);
-  } else if (code.startsWith('```')) {
-    code = code.slice(3);
+  const code = (data.lua_code || '').trim();
+  if (!code) {
+    throw new Error('Empty response from translation API');
   }
-  if (code.endsWith('```')) {
-    code = code.slice(0, -3);
-  }
-  code = code.trim();
 
   setCache(cacheKey, code);
   return code;
@@ -140,25 +86,41 @@ Description: ${description}`,
 
 /**
  * Translate Lua rule code to natural language description.
+ * Uses the dedicated /api/kiro/translate/lua-to-english endpoint on the Go backend,
+ * which returns a plain English description without any looksLikeLua validation.
  */
-export async function luaToNaturalLanguage(luaCode: string): Promise<string> {
-  const cacheKey = getCacheKey('lua2nl', luaCode);
+export async function luaToNaturalLanguage(luaCode: string, usesAi?: boolean): Promise<string> {
+  const cacheKey = getCacheKey('lua2nl', `${luaCode}:ai=${usesAi}`);
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  const result = await callKiro([
-    {
-      role: 'user',
-      content: `${SYSTEM_CONTEXT}
+  const body: Record<string, unknown> = { lua_code: luaCode };
+  if (usesAi !== undefined) {
+    body.uses_ai = usesAi;
+  }
 
-Describe this Lua email automation rule in plain English. Be concise but complete. Describe what emails it matches and what action it takes. Return ONLY the description, no code.
+  const res = await fetch(`${TRANSLATE_BASE}/lua-to-english`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 
-Lua code:
-${luaCode}`,
-    },
-  ]);
+  if (!res.ok) {
+    const body = await res.text().catch(() => res.statusText);
+    throw new Error(`Translation API error ${res.status}: ${body}`);
+  }
 
-  const description = result.trim();
+  const data = await res.json();
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  const description = (data.description || '').trim();
+  if (!description) {
+    throw new Error('Empty response from translation API');
+  }
+
   setCache(cacheKey, description);
   return description;
 }

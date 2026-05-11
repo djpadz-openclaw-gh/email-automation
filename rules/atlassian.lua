@@ -4,7 +4,7 @@
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-if not sender:find("atlassian.com", 1, true) then return skip() end
-if not subject:find("your payment has been processed", 1, true) then return skip() end
+if not sender:match("atlassian%.com") then return skip() end
+if not subject:match("your payment has been processed") then return skip() end
 
 return move("@Receipts & Invoices", "Atlassian payment confirmation")

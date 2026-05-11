@@ -9,6 +9,9 @@ export interface Rule {
   lua_code: string;
   priority: number;
   active: boolean;
+  source: string;    // 'manual' or 'auto-learned'
+  approved: boolean;
+  uses_ai: boolean;  // true if lua_code contains kiro.* calls
   created_at: string;
   updated_at: string;
 }
@@ -60,6 +63,49 @@ export interface ExecutionLog {
   executed_at: string;
 }
 
+export interface DryRunMatch {
+  message_id: string;
+  subject: string;
+  sender_address: string;
+  action: string;
+  target: string;
+  reason: string;
+}
+
+export interface DryRunResult {
+  total_scanned: number;
+  total_matched: number;
+  matches: DryRunMatch[];
+  cancelled?: boolean;
+}
+
+export interface ExecuteResult {
+  total_scanned: number;
+  total_executed: number;
+  total_failed: number;
+  results: DryRunMatch[];
+  errors?: string[];
+  cancelled?: boolean;
+}
+
+export interface DeferredAction {
+  id: number;
+  rule_id: number;
+  account_id: number;
+  message_id: string;
+  action: string;
+  target: string;
+  execute_at: string;
+  executed: boolean;
+  error: string;
+  created_at: string;
+  rule_name: string;
+}
+
+export interface DeferredActionsResponse {
+  deferred_actions: DeferredAction[];
+}
+
 export interface EmailContext {
   message_id: string;
   subject: string;
@@ -91,6 +137,15 @@ export interface AuthResponse {
   token: string;
   expires_at: string;
   user: AuthUser;
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  ai_enabled: boolean;
+  totp_enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface PasskeyInfo {
@@ -340,6 +395,10 @@ class ApiClient {
     return this.request<Rule[]>('/api/v1/rules');
   }
 
+  async listSuggestedRules(): Promise<Rule[]> {
+    return this.request<Rule[]>('/api/v1/rules/suggested');
+  }
+
   async getRule(id: number): Promise<Rule> {
     return this.request<Rule>(`/api/v1/rules/${id}`);
   }
@@ -362,6 +421,10 @@ class ApiClient {
     await this.request(`/api/v1/rules/${id}`, { method: 'DELETE' });
   }
 
+  async approveRule(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/rules/${id}/approve`, { method: 'POST' });
+  }
+
   async testRule(luaCode: string, email: EmailContext): Promise<RuleResult> {
     return this.request<RuleResult>('/api/v1/rules/test', {
       method: 'POST',
@@ -374,6 +437,23 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ lua_code: luaCode }),
     });
+  }
+
+  // --- OAuth2 ---
+  async listOAuthProviders(): Promise<{ providers: { name: string }[] }> {
+    return this.request<{ providers: { name: string }[] }>('/api/v1/oauth2/providers');
+  }
+
+  async oauthConnect(provider: string): Promise<{ auth_url: string; state: string }> {
+    return this.request<{ auth_url: string; state: string }>(`/api/v1/oauth2/connect/${encodeURIComponent(provider)}`);
+  }
+
+  async oauthRefreshToken(accountId: number): Promise<{ message: string; expires_at: string; expires_in: number }> {
+    return this.request(`/api/v1/oauth2/refresh/${accountId}`, { method: 'POST' });
+  }
+
+  async oauthDisconnect(accountId: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/oauth2/disconnect/${accountId}`, { method: 'POST' });
   }
 
   // --- Accounts ---
@@ -416,6 +496,137 @@ class ApiClient {
   // --- Logs ---
   async listLogs(limit: number = 50): Promise<ExecutionLog[]> {
     return this.request<ExecutionLog[]>(`/api/v1/logs?limit=${limit}`);
+  }
+
+  // --- Dry Run & Execute ---
+  async dryRunRule(id: number, luaCode?: string, limit?: number, signal?: AbortSignal): Promise<DryRunResult> {
+    const body: Record<string, unknown> = {};
+    if (luaCode) body.lua_code = luaCode;
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<DryRunResult>(`/api/v1/rules/${id}/dry-run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async dryRunAdHoc(luaCode: string, limit?: number, signal?: AbortSignal): Promise<DryRunResult> {
+    const body: Record<string, unknown> = { lua_code: luaCode };
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<DryRunResult>('/api/v1/rules/dry-run', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async cancelAdHocOperation(): Promise<{ message: string }> {
+    return this.request('/api/v1/rules/cancel-adhoc', { method: 'POST' });
+  }
+
+  async executeRule(id: number, luaCode?: string, limit?: number, signal?: AbortSignal): Promise<ExecuteResult> {
+    const body: Record<string, unknown> = {};
+    if (luaCode) body.lua_code = luaCode;
+    if (limit && limit > 0) body.limit = limit;
+    return this.request<ExecuteResult>(`/api/v1/rules/${id}/execute`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+
+  async cancelRuleOperation(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/rules/${id}/cancel`, { method: 'POST' });
+  }
+
+  // --- Deferred Actions ---
+  async listDeferredActions(): Promise<DeferredActionsResponse> {
+    return this.request<DeferredActionsResponse>('/api/v1/deferred-actions');
+  }
+
+  async cancelDeferredAction(id: number): Promise<{ message: string }> {
+    return this.request(`/api/v1/deferred-actions/${id}`, { method: 'DELETE' });
+  }
+
+  // --- Reorder ---
+  async reorderRules(ruleIds: number[]): Promise<{ message: string }> {
+    return this.request('/api/v1/rules/reorder', {
+      method: 'PATCH',
+      body: JSON.stringify({ rule_ids: ruleIds }),
+    });
+  }
+
+  // --- Bulk Operations ---
+  async bulkDeleteRules(ruleIds: number[]): Promise<{ message: string; deleted: number }> {
+    return this.request('/api/v1/rules/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ rule_ids: ruleIds }),
+    });
+  }
+
+  // --- Settings: Exempt Folders ---
+  async listExemptFolders(): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders');
+  }
+
+  async addExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>('/api/v1/settings/exempt-folders', {
+      method: 'POST',
+      body: JSON.stringify({ folder }),
+    });
+  }
+
+  async removeExemptFolder(folder: string): Promise<{ exempt_folders: string[] }> {
+    return this.request<{ exempt_folders: string[] }>(`/api/v1/settings/exempt-folders/${encodeURIComponent(folder)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // --- Admin (requires system API key) ---
+  private adminKey: string = '';
+
+  setAdminKey(key: string) {
+    this.adminKey = key;
+  }
+
+  private async adminRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string>),
+    };
+
+    if (this.adminKey) {
+      headers['X-API-Key'] = this.adminKey;
+    }
+
+    const url = API_URL ? `${API_URL}${path}` : path;
+    const res = await fetch(url, {
+      ...options,
+      headers,
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(body.error || `API error: ${res.status}`);
+    }
+
+    if (res.status === 204) return {} as T;
+    return res.json();
+  }
+
+  async adminListUsers(): Promise<{ users: AdminUser[] }> {
+    return this.adminRequest<{ users: AdminUser[] }>('/admin/users');
+  }
+
+  async adminGetUser(userId: number): Promise<AdminUser> {
+    return this.adminRequest<AdminUser>(`/admin/users/${userId}`);
+  }
+
+  async adminUpdateUserAI(userId: number, aiEnabled: boolean): Promise<{ message: string; user_id: number; ai_enabled: boolean }> {
+    return this.adminRequest(`/admin/users/${userId}/ai-enabled`, {
+      method: 'PATCH',
+      body: JSON.stringify({ ai_enabled: aiEnabled }),
+    });
   }
 }
 

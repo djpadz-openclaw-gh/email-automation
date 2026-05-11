@@ -34,6 +34,7 @@ func (h *AccountHandlers) ListAccounts(c *fiber.Ctx) error {
 	for i := range accounts {
 		accounts[i].Password = ""
 		accounts[i].OAuthToken = ""
+		accounts[i].OAuthRefreshToken = ""
 	}
 	return c.JSON(accounts)
 }
@@ -53,6 +54,7 @@ func (h *AccountHandlers) GetAccount(c *fiber.Ctx) error {
 	// Redact sensitive fields
 	account.Password = ""
 	account.OAuthToken = ""
+	account.OAuthRefreshToken = ""
 	return c.JSON(account)
 }
 
@@ -75,6 +77,7 @@ func (h *AccountHandlers) CreateAccount(c *fiber.Ctx) error {
 
 	account.Password = ""
 	account.OAuthToken = ""
+	account.OAuthRefreshToken = ""
 	return c.Status(fiber.StatusCreated).JSON(account)
 }
 
@@ -99,6 +102,7 @@ func (h *AccountHandlers) UpdateAccount(c *fiber.Ctx) error {
 
 	account.Password = ""
 	account.OAuthToken = ""
+	account.OAuthRefreshToken = ""
 	return c.JSON(account)
 }
 

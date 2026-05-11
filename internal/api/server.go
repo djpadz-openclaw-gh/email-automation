@@ -16,6 +16,7 @@ import (
 	"github.com/djpadz/email-automation/internal/config"
 	"github.com/djpadz/email-automation/internal/db"
 	"github.com/djpadz/email-automation/internal/engine"
+	natsbus "github.com/djpadz/email-automation/internal/nats"
 )
 
 // Server is the HTTP API server.
@@ -25,10 +26,11 @@ type Server struct {
 	db     *db.DB
 	engine *engine.Engine
 	jwt    *auth.JWTManager
+	bus    *natsbus.Bus // optional; for credential change events
 }
 
 // NewServer creates a new API server.
-func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine) *Server {
+func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine, opts ...ServerOption) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:      "email-automation",
 		ErrorHandler: errorHandler,
@@ -44,10 +46,24 @@ func NewServer(cfg *config.Config, database *db.DB, eng *engine.Engine) *Server 
 		jwt:    jwtMgr,
 	}
 
+	for _, opt := range opts {
+		opt(s)
+	}
+
 	s.setupMiddleware()
 	s.setupRoutes()
 
 	return s
+}
+
+// ServerOption configures optional server dependencies.
+type ServerOption func(*Server)
+
+// WithBus sets the NATS bus for event publishing.
+func WithBus(bus *natsbus.Bus) ServerOption {
+	return func(s *Server) {
+		s.bus = bus
+	}
 }
 
 func (s *Server) setupMiddleware() {
@@ -126,12 +142,32 @@ func (s *Server) setupRoutes() {
 	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
 	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
 
-	// Admin endpoints (system API key)
+	// Admin endpoints (role-based access control)
 	admin := s.app.Group("/admin")
-	admin.Use(adminAuth(s.config.APIKey))
+	admin.Use(middleware.JWTAuthMiddleware(s.db, s.jwt))
+	admin.Use(middleware.RequireAuth())
+	admin.Use(middleware.RequireAdmin(s.db))
 	tenantH := &handlers.TenantHandlers{DB: s.db}
 	admin.Get("/tenants", tenantH.ListTenants)
 	admin.Post("/tenants", tenantH.CreateTenant)
+	admin.Post("/rotate-encryption-keys", func(c *fiber.Ctx) error {
+		rotated, err := s.db.RotateEncryptionKeys(c.Context())
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"message": "encryption key rotation complete",
+			"rotated": rotated,
+		})
+	})
+
+	// Admin user management
+	adminUserH := &handlers.AdminUserHandlers{DB: s.db}
+	admin.Get("/users", adminUserH.ListUsers)
+	admin.Get("/users/:userId", adminUserH.GetUser)
+	admin.Patch("/users/:userId/ai-enabled", adminUserH.UpdateAIEnabled)
+	admin.Post("/users/:userId/promote", adminUserH.PromoteUser)
+	admin.Post("/users/:userId/demote", adminUserH.DemoteUser)
 
 	// API v1 (JWT + API key auth)
 	v1 := s.app.Group("/api/v1")
@@ -146,15 +182,56 @@ func (s *Server) setupRoutes() {
 	v1.Delete("/rules/:id", ruleH.DeleteRule)
 	v1.Post("/rules/test", ruleH.TestRule)
 	v1.Post("/rules/validate", ruleH.ValidateRule)
+	v1.Post("/rules/dry-run", ruleH.DryRunAdHoc)
+	v1.Post("/rules/cancel-adhoc", ruleH.CancelAdHocOperation)
 	v1.Get("/logs", ruleH.ListExecutionLogs)
+	v1.Get("/rules/suggested", ruleH.ListSuggestedRules)
+	v1.Post("/rules/:id/approve", ruleH.ApproveRule)
+	v1.Post("/rules/:id/dry-run", ruleH.DryRunRule)
+	v1.Post("/rules/:id/execute", ruleH.ExecuteRule)
+	v1.Post("/rules/:id/cancel", ruleH.CancelOperation)
+	v1.Post("/rules/bulk-delete", ruleH.BulkDeleteRules)
+
+	// Deferred actions
+	v1.Get("/deferred-actions", ruleH.ListDeferredActions)
+	v1.Delete("/deferred-actions/:id", ruleH.CancelDeferredAction)
+	v1.Patch("/rules/reorder", ruleH.ReorderRules)
 
 	// Accounts
-	accountH := &handlers.AccountHandlers{DB: s.db}
+	accountH := &handlers.AccountHandlers{DB: s.db, Bus: s.bus}
 	v1.Get("/accounts", accountH.ListAccounts)
 	v1.Get("/accounts/:id", accountH.GetAccount)
 	v1.Post("/accounts", accountH.CreateAccount)
 	v1.Put("/accounts/:id", accountH.UpdateAccount)
 	v1.Delete("/accounts/:id", accountH.DeleteAccount)
+
+	// Email metadata
+	metadataH := &handlers.MetadataHandlers{DB: s.db}
+	v1.Post("/emails/:messageId/metadata", metadataH.AttachMetadata)
+	v1.Get("/emails/:messageId/metadata", metadataH.GetMetadata)
+	v1.Patch("/emails/:messageId/metadata/:key", metadataH.UpdateMetadata)
+	v1.Delete("/emails/:messageId/metadata/:key", metadataH.DeleteMetadata)
+	v1.Get("/metadata/search", metadataH.SearchByMetadata)
+	v1.Post("/metadata/batch-attach", metadataH.BatchAttachMetadata)
+	v1.Post("/metadata/batch-query", metadataH.BatchQueryMetadata)
+
+	// Settings: Exempt folders
+	exemptH := &handlers.ExemptFoldersHandlers{DB: s.db}
+	v1.Get("/settings/exempt-folders", exemptH.ListExemptFolders)
+	v1.Post("/settings/exempt-folders", exemptH.AddExemptFolder)
+	v1.Delete("/settings/exempt-folders/:folder", exemptH.RemoveExemptFolder)
+
+	// OAuth2
+	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)
+	oauth2H.Bus = s.bus
+	v1.Get("/oauth2/providers", oauth2H.ListProviders)
+	v1.Get("/oauth2/connect/:provider", oauth2H.Connect)
+	v1.Post("/oauth2/refresh/:id", oauth2H.RefreshToken)
+	v1.Post("/oauth2/disconnect/:id", oauth2H.Disconnect)
+
+	// OAuth2 callback (no JWT auth required - user is redirected here from provider)
+	// Registered outside /api/v1 to avoid JWT middleware
+	s.app.Get("/api/oauth2/callback/:provider", oauth2H.Callback)
 }
 
 // Start begins listening on the configured address.
@@ -176,25 +253,3 @@ func errorHandler(c *fiber.Ctx, err error) error {
 	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 }
 
-func adminAuth(systemKey string) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		if systemKey == "" {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "admin API not configured",
-			})
-		}
-		key := c.Get("X-API-Key")
-		if key == "" {
-			key = c.Get("Authorization")
-			if len(key) > 7 {
-				key = key[7:]
-			}
-		}
-		if key != systemKey {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid admin API key",
-			})
-		}
-		return c.Next()
-	}
-}

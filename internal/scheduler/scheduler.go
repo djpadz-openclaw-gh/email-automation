@@ -7,12 +7,14 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/djpadz/email-automation/internal/db"
+	natsbus "github.com/djpadz/email-automation/internal/nats"
 	"github.com/djpadz/email-automation/internal/notifier"
 )
 
 // Scheduler processes deferred actions on a timer.
 type Scheduler struct {
 	db       *db.DB
+	bus      *natsbus.Bus
 	notifier *notifier.Telegram
 	interval time.Duration
 	stopCh   chan struct{}
@@ -26,6 +28,11 @@ func New(database *db.DB, telegram *notifier.Telegram, interval time.Duration) *
 		interval: interval,
 		stopCh:   make(chan struct{}),
 	}
+}
+
+// SetBus sets the NATS bus for publishing deferred action events.
+func (s *Scheduler) SetBus(bus *natsbus.Bus) {
+	s.bus = bus
 }
 
 // Start begins the scheduler loop.
@@ -74,18 +81,31 @@ func (s *Scheduler) processPending(ctx context.Context) {
 			Str("action", action.Action).
 			Logger()
 
-		// TODO: Execute the actual IMAP action (move, delete, etc.)
-		// This requires access to the IMAP connection for the account.
-		// For now, we publish to NATS for the IMAP worker to handle.
-		logger.Info().Msg("executing deferred action")
+		// Publish to NATS for the IMAP worker to execute
+		if s.bus != nil {
+			event := &natsbus.DeferredActionEvent{
+				ActionID:  action.ID,
+				AccountID: action.AccountID,
+				MessageID: action.MessageID,
+				Action:    action.Action,
+				Target:    action.Target,
+			}
+			if err := s.bus.Publish(natsbus.SubjectDeferredAction, event); err != nil {
+				logger.Error().Err(err).Msg("failed to publish deferred action event")
+				continue
+			}
+			logger.Info().Msg("published deferred action to NATS")
+		} else {
+			logger.Warn().Msg("NATS bus not available, cannot execute deferred action")
+			continue
+		}
 
-		errMsg := ""
 		// Mark as done
-		if err := s.db.MarkDeferredActionDone(ctx, action.ID, errMsg); err != nil {
+		if err := s.db.MarkDeferredActionDone(ctx, action.ID, ""); err != nil {
 			logger.Error().Err(err).Msg("failed to mark deferred action as done")
 			continue
 		}
 
-		logger.Info().Msg("deferred action completed")
+		logger.Info().Msg("deferred action queued for execution")
 	}
 }

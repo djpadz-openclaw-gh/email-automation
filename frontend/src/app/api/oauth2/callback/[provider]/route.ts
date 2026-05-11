@@ -1,111 +1,101 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 /**
- * OAuth2 callback handler - proxies the callback to the backend
- * and returns an HTML page that auto-closes the popup window.
+ * OAuth2 callback handler.
+ * 
+ * This route intercepts the OAuth2 callback from Google/Microsoft before
+ * the Next.js rewrite can proxy it to the backend. It forwards the request
+ * to the backend API, then returns an HTML page with JavaScript that:
+ * - If opened as a popup: notifies parent via postMessage and closes itself
+ * - If opened directly: redirects to home page with success/error
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
-  const searchParams = request.nextUrl.searchParams;
+  const { searchParams } = new URL(request.url);
+
   const code = searchParams.get('code');
   const state = searchParams.get('state');
   const error = searchParams.get('error');
   const errorDescription = searchParams.get('error_description');
 
-  // If OAuth provider returned an error
+  // If the OAuth provider returned an error, return error page
   if (error) {
-    return new NextResponse(renderHTML(false, errorDescription || error), {
-      headers: { 'Content-Type': 'text/html' },
-    });
+    const message = errorDescription || error;
+    return getCallbackPage(false, message);
   }
 
   if (!code || !state) {
-    return new NextResponse(renderHTML(false, 'Missing code or state parameter'), {
-      headers: { 'Content-Type': 'text/html' },
-    });
+    return getCallbackPage(false, 'Missing code or state parameter');
   }
 
-  // Forward the callback to the backend
+  // Forward the callback to the backend API
   const apiUrl = process.env.API_URL || 'http://api.email-automation.svc.cluster.local:8080';
-  const backendUrl = `${apiUrl}/api/oauth2/callback/${provider}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+  const backendUrl = `${apiUrl}/api/oauth2/callback/${encodeURIComponent(provider)}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
 
   try {
-    const res = await fetch(backendUrl);
-    const body = await res.json();
+    const response = await fetch(backendUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
 
-    if (!res.ok) {
-      return new NextResponse(renderHTML(false, body.error || 'Connection failed'), {
-        headers: { 'Content-Type': 'text/html' },
-      });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ error: response.statusText }));
+      const message = body.error || `OAuth failed: ${response.status}`;
+      return getCallbackPage(false, message);
     }
 
-    const email = body.account?.email || '';
-    return new NextResponse(renderHTML(true, `Account connected: ${email}`), {
-      headers: { 'Content-Type': 'text/html' },
-    });
+    // Success - return page that closes popup or redirects
+    return getCallbackPage(true, 'Account connected successfully');
   } catch (err) {
-    return new NextResponse(renderHTML(false, 'Failed to connect to backend'), {
-      headers: { 'Content-Type': 'text/html' },
-    });
+    const message = err instanceof Error ? err.message : 'OAuth callback failed';
+    return getCallbackPage(false, message);
   }
 }
 
-function renderHTML(success: boolean, message: string): string {
-  const icon = success ? '✅' : '❌';
-  const title = success ? 'Account Connected' : 'Connection Failed';
-  const bgColor = success ? '#f0fdf4' : '#fef2f2';
-  const textColor = success ? '#166534' : '#991b1b';
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${title}</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      margin: 0;
-      background: ${bgColor};
-    }
-    .container {
-      text-align: center;
-      padding: 2rem;
-    }
-    .icon { font-size: 3rem; margin-bottom: 1rem; }
-    .title { font-size: 1.25rem; font-weight: 600; color: ${textColor}; margin-bottom: 0.5rem; }
-    .message { color: #6b7280; font-size: 0.875rem; margin-bottom: 1.5rem; }
-    .closing { color: #9ca3af; font-size: 0.75rem; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="icon">${icon}</div>
-    <div class="title">${title}</div>
-    <div class="message">${message}</div>
-    <div class="closing">${success ? 'This window will close automatically...' : 'You can close this window.'}</div>
-  </div>
-  <script>
-    ${success ? `
-    // Notify opener and close after a short delay
-    if (window.opener) {
-      window.opener.postMessage({ type: 'oauth2_complete', success: true }, '*');
-    }
-    setTimeout(() => window.close(), 1500);
-    ` : `
-    // Notify opener of failure
-    if (window.opener) {
-      window.opener.postMessage({ type: 'oauth2_complete', success: false, error: ${JSON.stringify(message)} }, '*');
-    }
-    `}
-  </script>
-</body>
-</html>`;
+function getCallbackPage(success: boolean, message: string) {
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>OAuth Callback</title>
+        <script>
+          // Check if this window was opened as a popup
+          const isPopup = window.opener && !window.opener.closed;
+          
+          if (isPopup) {
+            // Notify parent window via postMessage
+            window.opener.postMessage(
+              {
+                type: 'oauth_callback',
+                success: ${success},
+                message: ${JSON.stringify(message)}
+              },
+              '*'
+            );
+            // Close this popup after a short delay to ensure message is received
+            setTimeout(() => window.close(), 100);
+          } else {
+            // Not a popup - redirect to home page with status in URL
+            const param = ${success} ? 'oauth_success=1' : 'oauth_error=' + encodeURIComponent(${JSON.stringify(message)});
+            window.location.href = '/?' + param;
+          }
+        </script>
+      </head>
+      <body>
+        <p>${success ? 'Account connected successfully. Closing...' : 'OAuth failed: ' + message}</p>
+      </body>
+    </html>
+  `;
+  
+  return new NextResponse(html, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+    },
+  });
 }

@@ -8,23 +8,24 @@ const nextConfig = {
   async rewrites() {
     const apiUrl = process.env.API_URL || 'http://api.email-automation.svc.cluster.local:8080';
     return {
-      // beforeFiles rewrites are checked before pages/public files
-      // but AFTER API route handlers in the app directory
+      // beforeFiles: rewrites checked before filesystem routes (pages/app)
       beforeFiles: [],
-      // afterFiles rewrites are checked after pages/public files
-      // This ensures our /api/oauth2/callback route handler takes precedence
-      afterFiles: [
+      // afterFiles: rewrites checked after filesystem routes but before fallback
+      afterFiles: [],
+      // fallback: only checked when no filesystem route matches
+      // This ensures App Router routes (like /api/oauth2/callback) take priority
+      fallback: [
         {
           source: '/auth/:path*',
           destination: `${apiUrl}/auth/:path*`,
         },
         {
-          source: '/api/v1/:path*',
-          destination: `${apiUrl}/api/v1/:path*`,
+          source: '/api/:path*',
+          destination: `${apiUrl}/api/:path*`,
         },
         {
-          source: '/api/kiro/:path*',
-          destination: `${apiUrl}/api/kiro/:path*`,
+          source: '/admin/:path*',
+          destination: `${apiUrl}/admin/:path*`,
         },
         {
           source: '/config',
@@ -39,8 +40,6 @@ const nextConfig = {
           destination: `${apiUrl}/ready`,
         },
       ],
-      // fallback rewrites are checked after both pages and afterFiles
-      fallback: [],
     };
   },
 };

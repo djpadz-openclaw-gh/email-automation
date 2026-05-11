@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rules-engine
+  namespace: email-automation
+  labels:
+    app.kubernetes.io/name: email-automation
+    app.kubernetes.io/component: rules-engine
+spec:
+  replicas: 2  # Horizontally scalable via JetStream queue group
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: email-automation
+      app.kubernetes.io/component: rules-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: email-automation
+        app.kubernetes.io/component: rules-engine
+    spec:
+      serviceAccountName: email-automation
+      containers:
+        - name: rules-engine
+          image: registry.container-registry.svc.cluster.local:32000/email-automation:latest
+          command: ["./rules-engine"]
+          env:
+            - name: NATS_URL
+              value: "nats://nats:4222"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LOG_JSON
+              value: "true"
+            - name: KIRO_TEXT_MODEL
+              value: "claude-haiku-4.5"
+            - name: KIRO_VISION_MODEL
+              value: "claude-haiku-4.5"
+          envFrom:
+            - secretRef:
+                name: email-automation-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command: ["test", "-f", "/proc/1/status"]
+            initialDelaySeconds: 10
+            periodSeconds: 30

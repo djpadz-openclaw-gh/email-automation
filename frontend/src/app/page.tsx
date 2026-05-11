@@ -9,8 +9,10 @@ import LogViewer from '@/components/LogViewer';
 import LoginForm from '@/components/LoginForm';
 import RegisterForm from '@/components/RegisterForm';
 import Settings from '@/components/Settings';
+import DeferredActions from '@/components/DeferredActions';
+import AdminUsers from '@/components/AdminUsers';
 
-type Tab = 'rules' | 'accounts' | 'logs' | 'settings';
+type Tab = 'rules' | 'accounts' | 'logs' | 'pending' | 'admin' | 'settings';
 type AuthView = 'login' | 'register';
 
 export default function Home() {
@@ -35,6 +37,12 @@ export default function Home() {
     api.setOnUnauthorized(() => {
       handleLogout();
     });
+
+    // If returning from OAuth flow, switch to accounts tab
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('oauth_success') || params.has('oauth_error')) {
+      setActiveTab('accounts');
+    }
 
     // Fetch config to check if registration is enabled
     api.getConfig().then(config => {
@@ -124,6 +132,8 @@ export default function Home() {
               { id: 'rules' as Tab, label: 'Rules', icon: '⚡' },
               { id: 'accounts' as Tab, label: 'Accounts', icon: '📬' },
               { id: 'logs' as Tab, label: 'Activity Log', icon: '📋' },
+              { id: 'pending' as Tab, label: 'Pending', icon: '⏳' },
+              { id: 'admin' as Tab, label: 'Admin', icon: '🔧' },
             ]).map((tab) => (
               <button
                 key={tab.id}
@@ -171,6 +181,8 @@ export default function Home() {
 
         {activeTab === 'accounts' && <AccountList />}
         {activeTab === 'logs' && <LogViewer />}
+        {activeTab === 'pending' && <DeferredActions />}
+        {activeTab === 'admin' && <AdminUsers />}
         {activeTab === 'settings' && <Settings onBack={() => setActiveTab('rules')} />}
       </main>
     </div>
