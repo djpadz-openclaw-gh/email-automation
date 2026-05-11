@@ -37,6 +37,7 @@ Thumbs.db
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+frontend/tsconfig.tsbuildinfo
 
 # Root node_modules (Playwright e2e)
 /node_modules/
@@ -54,3 +55,6 @@ tests/e2e/results/
 *.key
 credentials.json
 /server
+
+# Build artifacts
+*.tsbuildinfo
