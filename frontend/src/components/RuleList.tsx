@@ -3,6 +3,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api, { Rule } from '@/lib/api';
 
+// Simple toast notification component
+function Toast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, 3000);
+    return () => clearTimeout(timer);
+  }, [onDismiss]);
+
+  return (
+    <div
+      className="fixed bottom-6 right-6 z-50 px-4 py-3 bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 rounded-lg shadow-lg text-sm font-medium animate-fade-in"
+      role="status"
+      aria-live="polite"
+    >
+      {message}
+    </div>
+  );
+}
+
 interface RuleListProps {
   onEdit: (rule: Rule) => void;
   onCreate: () => void;
@@ -19,6 +37,12 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [showBulkConfirm, setShowBulkConfirm] = useState(false);
+
+  // Toast notification state
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Fade-out animation state
+  const [fadingIds, setFadingIds] = useState<Set<number>>(new Set());
 
   // Drag state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -59,7 +83,22 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
     if (!confirm(`Delete rule "${rule.name}"?`)) return;
     try {
       await api.deleteRule(rule.id);
-      await loadRules();
+      // Animate fade-out then remove from state
+      setFadingIds((prev) => new Set(prev).add(rule.id));
+      setTimeout(() => {
+        setRules((prev) => prev.filter((r) => r.id !== rule.id));
+        setFadingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(rule.id);
+          return next;
+        });
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(rule.id);
+          return next;
+        });
+      }, 300);
+      setToast(`Rule "${rule.name}" deleted`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to delete rule');
     }
@@ -77,7 +116,8 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
   const handleDismiss = async (rule: Rule) => {
     try {
       await api.deleteRule(rule.id);
-      await loadRules();
+      setSuggestedRules((prev) => prev.filter((r) => r.id !== rule.id));
+      setToast(`Suggestion dismissed`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to dismiss rule');
     }
@@ -108,11 +148,18 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
     if (selectedIds.size === 0) return;
     setBulkDeleting(true);
     setError('');
+    const count = selectedIds.size;
     try {
       await api.bulkDeleteRules(Array.from(selectedIds));
-      setSelectedIds(new Set());
+      // Animate fade-out for all selected
+      setFadingIds(new Set(selectedIds));
+      setTimeout(() => {
+        setRules((prev) => prev.filter((r) => !selectedIds.has(r.id)));
+        setFadingIds(new Set());
+        setSelectedIds(new Set());
+      }, 300);
       setShowBulkConfirm(false);
-      await loadRules();
+      setToast(`${count} rule${count !== 1 ? 's' : ''} deleted`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to delete rules');
     } finally {
@@ -414,10 +461,12 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
                 onDragStart={(e) => handleDragStart(e, index)}
                 onDragEnd={handleDragEnd}
                 onDragOver={(e) => handleDragOver(e, index)}
-                className={`bg-white dark:bg-gray-900 rounded-xl border p-4 transition-all ${
-                  dragIndex === index
-                    ? 'opacity-50 border-blue-400 dark:border-blue-600'
-                    : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700'
+                className={`bg-white dark:bg-gray-900 rounded-xl border p-4 transition-all duration-300 ${
+                  fadingIds.has(rule.id)
+                    ? 'opacity-0 scale-95 max-h-0 overflow-hidden py-0 my-0 border-transparent'
+                    : dragIndex === index
+                      ? 'opacity-50 border-blue-400 dark:border-blue-600'
+                      : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700'
                 }`}
               >
               <div className="flex items-start">
@@ -526,6 +575,8 @@ export default function RuleList({ onEdit, onCreate }: RuleListProps) {
           })}
         </div>
       )}
+      {/* Toast notification */}
+      {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
