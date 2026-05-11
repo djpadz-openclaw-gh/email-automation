@@ -148,6 +148,14 @@ export interface AdminUser {
   updated_at: string;
 }
 
+export interface Tenant {
+  id: number;
+  name: string;
+  slug: string;
+  api_key: string;
+  created_at: string;
+}
+
 export interface PasskeyInfo {
   id: number;
   name: string;
@@ -626,6 +634,18 @@ class ApiClient {
     return this.adminRequest(`/admin/users/${userId}/ai-enabled`, {
       method: 'PATCH',
       body: JSON.stringify({ ai_enabled: aiEnabled }),
+    });
+  }
+
+  async adminListTenants(): Promise<Tenant[]> {
+    const resp = await this.adminRequest<{ tenants: Tenant[] }>('/admin/tenants');
+    return resp.tenants || [];
+  }
+
+  async adminCreateTenant(name: string, slug: string): Promise<Tenant> {
+    return this.adminRequest<Tenant>('/admin/tenants', {
+      method: 'POST',
+      body: JSON.stringify({ name, slug }),
     });
   }
 }
