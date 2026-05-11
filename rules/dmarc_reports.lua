@@ -6,21 +6,13 @@ local subject = email.subject:lower()
 -- Strip common email client prefixes like [Preview], [Fwd:], etc.
 subject = subject:gsub("^%s*%[[^%]]-]%s*", "")
 
-local phrases = {
+if contains_any(subject, {
     "report domain:",
     "dmarc aggregate report",
     "dmarc feedback report",
     "dmarc report for",
-}
-
-local match = false
-for _, phrase in ipairs(phrases) do
-    if subject:find(phrase, 1, true) then
-        match = true
-        break
-    end
+}) then
+    return move("@30DayTrash", "DMARC aggregate report")
 end
 
-if not match then return skip() end
-
-return move("@30DayTrash", "DMARC aggregate report")
+return skip()

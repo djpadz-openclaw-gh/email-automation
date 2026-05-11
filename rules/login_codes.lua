@@ -18,14 +18,12 @@ local code_phrases = {
 }
 
 -- Direct subject match
-for _, phrase in ipairs(code_phrases) do
-    if subject:find(phrase, 1, true) then
-        return delete("Login/verification code email, older than 1h")
-    end
+if contains_any(subject, code_phrases) then
+    return delete("Login/verification code email, older than 1h")
 end
 
 -- Trusted auth sender + auth keyword match
-local trusted_senders = {
+local trusted_domains = {
     "anthropic.com", "accounts.google.com", "account.microsoft.com",
     "github.com", "okta.com", "auth0.com", "onelogin.com", "atlassian.com",
 }
@@ -36,19 +34,15 @@ local auth_keywords = {
 }
 
 local is_trusted = false
-for _, domain in ipairs(trusted_senders) do
-    if sender:find(domain, 1, true) then
+for _, domain in ipairs(trusted_domains) do
+    if sender:match(domain:gsub("%.", "%%.")) then
         is_trusted = true
         break
     end
 end
 
-if is_trusted then
-    for _, kw in ipairs(auth_keywords) do
-        if subject:find(kw, 1, true) then
-            return delete("Auth email from trusted sender, older than 1h")
-        end
-    end
+if is_trusted and contains_any(subject, auth_keywords) then
+    return delete("Auth email from trusted sender, older than 1h")
 end
 
 return skip()

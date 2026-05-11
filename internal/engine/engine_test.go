@@ -695,3 +695,258 @@ func TestEngineMalformedRule(t *testing.T) {
 		})
 	}
 }
+
+func TestEngineKiroNamespace_Available(t *testing.T) {
+	// Without a kiro client, kiro functions should still be available but return false
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-kiro-no-client",
+		LuaCode: `
+-- kiro table should exist even without API key
+assert(type(kiro) == "table")
+assert(type(kiro.classify) == "function")
+assert(type(kiro.is_actionable) == "function")
+
+-- Without API key, kiro.classify should return false gracefully
+if kiro.classify(email, "Is this important?") then
+    return keep("important")
+end
+return skip()
+`,
+	}
+
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "skip" {
+		t.Errorf("expected skip (kiro without API key returns false), got %s", result.Action)
+	}
+}
+
+func TestEngineKiroNamespace_WithClient(t *testing.T) {
+	// With a kiro client (but no real API key), functions should still not panic
+	kiroClient := NewKiroClient("", "", "", "")
+	eng := NewWithKiro(kiroClient)
+	rule := &models.Rule{
+		Name: "test-kiro-with-client",
+		LuaCode: `
+assert(type(kiro) == "table")
+-- is_actionable should return false when API key is empty
+if kiro.is_actionable(email) then
+    return keep("actionable")
+end
+return archive("not actionable")
+`,
+	}
+
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "archive" {
+		t.Errorf("expected archive (kiro without API key returns false), got %s", result.Action)
+	}
+}
+
+// --- schedule() tests ---
+
+func TestEngineEvaluate_ScheduleMove(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-move",
+		LuaCode: `
+schedule(3 * 60 * 60, function()
+    move("@Archive")
+end)
+`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Target != "@Archive" {
+		t.Errorf("expected target '@Archive', got '%s'", result.Target)
+	}
+	if result.Delay != 10800 {
+		t.Errorf("expected delay 10800, got %d", result.Delay)
+	}
+	if result.Reason != "scheduled move" {
+		t.Errorf("expected reason 'scheduled move', got '%s'", result.Reason)
+	}
+}
+
+func TestEngineEvaluate_ScheduleDelete(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-delete",
+		LuaCode: `
+schedule(24 * 60 * 60, function()
+    delete()
+end)
+`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Delay != 86400 {
+		t.Errorf("expected delay 86400, got %d", result.Delay)
+	}
+	if result.Reason != "scheduled delete" {
+		t.Errorf("expected reason 'scheduled delete', got '%s'", result.Reason)
+	}
+}
+
+func TestEngineEvaluate_ScheduleArchive(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-archive",
+		LuaCode: `
+schedule(30 * 60, function()
+    archive()
+end)
+`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Delay != 1800 {
+		t.Errorf("expected delay 1800, got %d", result.Delay)
+	}
+	if result.Reason != "scheduled archive" {
+		t.Errorf("expected reason 'scheduled archive', got '%s'", result.Reason)
+	}
+}
+
+func TestEngineEvaluate_ScheduleFlag(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-flag",
+		LuaCode: `
+schedule(2 * 60 * 60, function()
+    flag("important")
+end)
+`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Target != "important" {
+		t.Errorf("expected target 'important', got '%s'", result.Target)
+	}
+	if result.Delay != 7200 {
+		t.Errorf("expected delay 7200, got %d", result.Delay)
+	}
+}
+
+func TestEngineEvaluate_ScheduleNotify(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-notify",
+		LuaCode: `
+schedule(60 * 60, function()
+    notify("Reminder: check this email")
+end)
+`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Target != "Reminder: check this email" {
+		t.Errorf("expected target 'Reminder: check this email', got '%s'", result.Target)
+	}
+	if result.Delay != 3600 {
+		t.Errorf("expected delay 3600, got %d", result.Delay)
+	}
+}
+
+func TestEngineEvaluate_ScheduleNoAction(t *testing.T) {
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-no-action",
+		LuaCode: `
+schedule(3600, function()
+    -- no action called inside
+end)
+`,
+	}
+	_, err := eng.Evaluate(rule, sampleEmail())
+	if err == nil {
+		t.Fatal("expected error for schedule with no action, got nil")
+	}
+}
+
+func TestEngineEvaluate_ScheduleConditional(t *testing.T) {
+	// Test that schedule works with conditions before it
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-schedule-conditional",
+		LuaCode: `
+local sender = email.sender_address:lower()
+if not ends_with(sender, "amazon.com") then return skip() end
+
+schedule(3 * 60 * 60, function()
+    move("@Amazon")
+end)
+`,
+	}
+
+	// Should match amazon sender
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "defer" {
+		t.Errorf("expected defer, got %s", result.Action)
+	}
+	if result.Target != "@Amazon" {
+		t.Errorf("expected target '@Amazon', got '%s'", result.Target)
+	}
+
+	// Should skip non-amazon sender
+	result2, err := eng.Evaluate(rule, sampleEmail(withSender("Other", "test@other.com")))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result2.Action != "skip" {
+		t.Errorf("expected skip for non-amazon, got %s", result2.Action)
+	}
+}
+
+func TestEngineEvaluate_ScheduleDoesNotAffectNormalActions(t *testing.T) {
+	// Verify that normal action calls still work after schedule is registered
+	eng := New()
+	rule := &models.Rule{
+		Name: "test-normal-after-schedule",
+		LuaCode: `return move("@Test", "normal move")`,
+	}
+	result, err := eng.Evaluate(rule, sampleEmail())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != "move" {
+		t.Errorf("expected move, got %s", result.Action)
+	}
+	if result.Target != "@Test" {
+		t.Errorf("expected target '@Test', got '%s'", result.Target)
+	}
+}

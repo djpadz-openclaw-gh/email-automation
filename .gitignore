@@ -58,3 +58,6 @@ credentials.json
 
 # Build artifacts
 *.tsbuildinfo
+
+# Test screenshots
+tests/e2e/screenshots-latest/

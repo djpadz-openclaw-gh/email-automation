@@ -138,7 +138,7 @@ func RequireAuth() fiber.Handler {
 }
 
 // RequireAdmin is a middleware that ensures the authenticated user has the admin role.
-// User #1 is always treated as admin regardless of the role column.
+// Must be used after JWTAuthMiddleware and RequireAuth.
 func RequireAdmin(database *db.DB) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userID, ok := c.Locals("user_id").(int64)
@@ -148,16 +148,10 @@ func RequireAdmin(database *db.DB) fiber.Handler {
 			})
 		}
 
-		// User #1 is always admin
-		if userID == 1 {
-			return c.Next()
-		}
-
-		// Check role from database
 		user, err := database.GetUserByID(c.Context(), userID)
 		if err != nil {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "admin access required",
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "user not found",
 			})
 		}
 
@@ -167,6 +161,7 @@ func RequireAdmin(database *db.DB) fiber.Handler {
 			})
 		}
 
+		c.Locals("admin_user", user)
 		return c.Next()
 	}
 }

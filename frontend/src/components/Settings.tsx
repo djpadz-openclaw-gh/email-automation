@@ -39,6 +39,8 @@ export default function Settings({ onBack }: SettingsProps) {
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyValue, setNewKeyValue] = useState('');
 
+
+
   useEffect(() => {
     loadProfile();
   }, []);
@@ -74,6 +76,8 @@ export default function Settings({ onBack }: SettingsProps) {
       setApiKeysLoading(false);
     }
   };
+
+
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -234,6 +238,7 @@ export default function Settings({ onBack }: SettingsProps) {
     { id: 'totp' as const, label: '📱 2FA', icon: '📱' },
     { id: 'passkeys' as const, label: '🔑 Passkeys', icon: '🔑' },
     { id: 'apikeys' as const, label: '🗝️ API Keys', icon: '🗝️' },
+
   ];
 
   return (
@@ -435,6 +440,8 @@ export default function Settings({ onBack }: SettingsProps) {
           )}
         </div>
       )}
+
+
     </div>
   );
 }

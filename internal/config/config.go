@@ -34,6 +34,9 @@ type Config struct {
 	// Rules
 	RulesDir string
 
+	// Migrations
+	MigrationsDir string
+
 	// Auth (legacy admin key)
 	APIKey string
 
@@ -50,12 +53,27 @@ type Config struct {
 	WebAuthnRPOrigins     []string
 
 	// Kiro API
-	KiroAPIKey string
-	KiroAPIURL string
+	KiroAPIKey     string
+	KiroAPIURL     string
+	KiroTextModel  string
+	KiroVisionModel string
+
+	// Encryption
+	EncryptionMasterKey        string
+	EncryptionMasterKeyVersion int
+	EncryptionPreviousKeys     map[int]string // version → key for rotation
 
 	// Rate limiting
 	RateLimitWindow   time.Duration
 	RateLimitMaxFails int
+
+	// OAuth2
+	OAuth2Microsoft365ClientID     string
+	OAuth2Microsoft365ClientSecret string
+	OAuth2Microsoft365TenantID     string
+	OAuth2GmailClientID            string
+	OAuth2GmailClientSecret        string
+	OAuth2RedirectBaseURL          string
 
 	// Logging
 	LogLevel string
@@ -76,6 +94,7 @@ func Load() *Config {
 		TelegramBotToken:  envStr("TELEGRAM_BOT_TOKEN", ""),
 		TelegramChatID:    envStr("TELEGRAM_CHAT_ID", ""),
 		RulesDir:          envStr("RULES_DIR", "./rules"),
+		MigrationsDir:     envStr("MIGRATIONS_DIR", "./migrations"),
 		APIKey:            envStr("API_KEY", ""),
 		JWTSecret:         envStr("JWT_SECRET", ""),
 		JWTExpiration:     envDuration("JWT_EXPIRATION", 24*time.Hour),
@@ -85,7 +104,18 @@ func Load() *Config {
 		RateLimitMaxFails: envInt("RATE_LIMIT_MAX_FAILS", 10),
 		KiroAPIKey:          envStr("KIRO_API_KEY", ""),
 		KiroAPIURL:          envStr("KIRO_API_URL", "https://api.anthropic.com/v1/messages"),
+		KiroTextModel:       envStr("KIRO_TEXT_MODEL", "claude-haiku-4.5"),
+		KiroVisionModel:     envStr("KIRO_VISION_MODEL", "claude-haiku-4.5"),
+		EncryptionMasterKey:        envStr("ENCRYPTION_MASTER_KEY", ""),
+		EncryptionMasterKeyVersion: envInt("ENCRYPTION_MASTER_KEY_VERSION", 1),
+		EncryptionPreviousKeys:     parsePreviousKeys(),
 		RegistrationEnabled: envBool("REGISTRATION_ENABLED", true),
+		OAuth2Microsoft365ClientID:     envStr("OAUTH2_MS365_CLIENT_ID", ""),
+		OAuth2Microsoft365ClientSecret: envStr("OAUTH2_MS365_CLIENT_SECRET", ""),
+		OAuth2Microsoft365TenantID:     envStr("OAUTH2_MS365_TENANT_ID", ""),
+		OAuth2GmailClientID:            envStr("OAUTH2_GMAIL_CLIENT_ID", ""),
+		OAuth2GmailClientSecret:        envStr("OAUTH2_GMAIL_CLIENT_SECRET", ""),
+		OAuth2RedirectBaseURL:          envStr("OAUTH2_REDIRECT_BASE_URL", ""),
 		LogLevel:          envStr("LOG_LEVEL", "info"),
 		LogJSON:           envBool("LOG_JSON", true),
 	}
@@ -149,4 +179,26 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// parsePreviousKeys reads ENCRYPTION_MASTER_KEY_V<N> environment variables
+// for key rotation support. E.g. ENCRYPTION_MASTER_KEY_V1=oldkey
+func parsePreviousKeys() map[int]string {
+	keys := make(map[int]string)
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "ENCRYPTION_MASTER_KEY_V") {
+			continue
+		}
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		versionStr := strings.TrimPrefix(parts[0], "ENCRYPTION_MASTER_KEY_V")
+		version, err := strconv.Atoi(versionStr)
+		if err != nil {
+			continue
+		}
+		keys[version] = parts[1]
+	}
+	return keys
 }

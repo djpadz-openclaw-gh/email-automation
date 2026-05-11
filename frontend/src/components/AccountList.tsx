@@ -1,32 +1,21 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import api, { Account, OAuth2Provider } from '@/lib/api';
-
-type ProviderType = 'imap' | 'microsoft365' | 'gmail';
-
-const PROVIDER_LABELS: Record<string, string> = {
-  imap: 'IMAP',
-  microsoft365: 'Microsoft 365',
-  gmail: 'Gmail',
-};
-
-const PROVIDER_ICONS: Record<string, string> = {
-  imap: '📧',
-  microsoft365: '🏢',
-  gmail: '✉️',
-};
+import { useState, useEffect, useCallback } from 'react';
+import api, { Account } from '@/lib/api';
 
 export default function AccountList() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [showForm, setShowForm] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<ProviderType>('imap');
-  const [availableOAuthProviders, setAvailableOAuthProviders] = useState<OAuth2Provider[]>([]);
-  const [oauthConnecting, setOauthConnecting] = useState<string | null>(null);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
 
-  // IMAP form state
+  // OAuth state
+  const [oauthProviders, setOauthProviders] = useState<string[]>([]);
+  const [oauthLoading, setOauthLoading] = useState<string | null>(null);
+
+  // Form state
   const [formName, setFormName] = useState('');
   const [formEmail, setFormEmail] = useState('');
   const [formHost, setFormHost] = useState('');
@@ -36,9 +25,10 @@ export default function AccountList() {
   const [formPassword, setFormPassword] = useState('');
   const [formSaving, setFormSaving] = useState(false);
 
-  // Ref for OAuth popup polling
-  const oauthPopupRef = useRef<Window | null>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Exempt folders state
+  const [exemptFolders, setExemptFolders] = useState<string[]>([]);
+  const [exemptFoldersLoading, setExemptFoldersLoading] = useState(false);
+  const [newExemptFolder, setNewExemptFolder] = useState('');
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -55,10 +45,12 @@ export default function AccountList() {
 
   const loadOAuthProviders = useCallback(async () => {
     try {
-      const providers = await api.listOAuth2Providers();
-      setAvailableOAuthProviders(providers);
+      const data = await api.listOAuthProviders();
+      if (data.providers) {
+        setOauthProviders(data.providers.map((p) => p.name));
+      }
     } catch {
-      // OAuth2 providers not available - that's fine, just show IMAP
+      // OAuth providers not available - that's fine, just don't show buttons
     }
   }, []);
 
@@ -67,90 +59,54 @@ export default function AccountList() {
     loadOAuthProviders();
   }, [loadAccounts, loadOAuthProviders]);
 
-  // Listen for postMessage from OAuth popup and cleanup on unmount
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'oauth2_complete') {
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = null;
-        }
-        setOauthConnecting(null);
-        if (event.data.success) {
-          setShowForm(false);
-          loadAccounts();
-        } else if (event.data.error) {
-          setError(event.data.error);
-        }
-      }
-    };
-
-    window.addEventListener('message', handleMessage);
-    return () => {
-      window.removeEventListener('message', handleMessage);
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
-    };
-  }, [loadAccounts]);
-
+  // OAuth connect handler - opens popup and listens for postMessage
   const handleOAuthConnect = async (provider: string) => {
     try {
+      setOauthLoading(provider);
       setError('');
-      setOauthConnecting(provider);
-
-      const { auth_url } = await api.oauth2Connect(provider);
-
-      // Open OAuth URL in a popup window
-      const width = 600;
-      const height = 700;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-
-      const popup = window.open(
-        auth_url,
-        'oauth2_connect',
-        `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,resizable=yes`
-      );
-
+      setSuccess('');
+      const data = await api.oauthConnect(provider);
+      
+      // Open OAuth in a popup window
+      const popup = window.open(data.auth_url, 'oauth_popup', 'width=500,height=600');
       if (!popup) {
-        setError('Popup blocked. Please allow popups for this site and try again.');
-        setOauthConnecting(null);
+        setError('Failed to open OAuth popup. Please check your browser popup settings.');
+        setOauthLoading(null);
         return;
       }
-
-      oauthPopupRef.current = popup;
-
-      // Poll for popup close
-      pollIntervalRef.current = setInterval(() => {
-        if (!popup || popup.closed) {
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
+      
+      // Listen for postMessage from the OAuth callback
+      const handleMessage = (event: MessageEvent) => {
+        if (event.data?.type === 'oauth_callback') {
+          window.removeEventListener('message', handleMessage);
+          setOauthLoading(null);
+          
+          if (event.data.success) {
+            setSuccess('Account connected successfully!');
+            loadAccounts();
+          } else {
+            setError(`OAuth failed: ${event.data.message}`);
           }
-          oauthPopupRef.current = null;
-          setOauthConnecting(null);
-          // Refresh accounts - the OAuth callback should have created the account
-          loadAccounts();
+        }
+      };
+      
+      window.addEventListener('message', handleMessage);
+      
+      // Clean up listener if popup is closed manually
+      const checkPopupClosed = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(checkPopupClosed);
+          window.removeEventListener('message', handleMessage);
+          setOauthLoading(null);
         }
       }, 500);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to start OAuth2 connection');
-      setOauthConnecting(null);
+      setError(err instanceof Error ? err.message : `Failed to connect ${provider}`);
+      setOauthLoading(null);
     }
   };
 
-  const handleDisconnect = async (account: Account) => {
-    if (!confirm(`Disconnect OAuth2 account "${account.name}" (${account.email})?`)) return;
-    try {
-      await api.oauth2Disconnect(account.id);
-      await loadAccounts();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to disconnect account');
-    }
-  };
-
-  const handleCreate = async () => {
+  const handleSave = async () => {
     if (!formName.trim() || !formEmail.trim() || !formHost.trim()) {
       setError('Name, email, and IMAP host are required');
       return;
@@ -159,7 +115,8 @@ export default function AccountList() {
     try {
       setFormSaving(true);
       setError('');
-      await api.createAccount({
+
+      const data: Partial<Account> & { password?: string } = {
         name: formName.trim(),
         email: formEmail.trim(),
         provider: 'imap',
@@ -167,16 +124,86 @@ export default function AccountList() {
         imap_port: formPort,
         imap_tls: formTLS,
         username: formUsername.trim() || formEmail.trim(),
-        active: true,
-      });
+        active: editingAccount?.active ?? true,
+      };
+
+      // Only include password if it was entered (for edits, empty means "don't change")
+      if (formPassword) {
+        (data as Record<string, unknown>).password = formPassword;
+      }
+
+      if (editingAccount) {
+        await api.updateAccount(editingAccount.id, data);
+      } else {
+        await api.createAccount(data);
+      }
+
       setShowForm(false);
+      setEditingAccount(null);
       resetForm();
       await loadAccounts();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to create account');
+      setError(err instanceof Error ? err.message : `Failed to ${editingAccount ? 'update' : 'create'} account`);
     } finally {
       setFormSaving(false);
     }
+  };
+
+  const loadExemptFolders = async (accountId: number) => {
+    try {
+      setExemptFoldersLoading(true);
+      const data = await api.listExemptFolders(accountId);
+      setExemptFolders(data.exempt_folders || []);
+    } catch { /* ignore */ } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
+  const handleAddExemptFolder = async () => {
+    if (!newExemptFolder.trim() || !editingAccount) return;
+    try {
+      setExemptFoldersLoading(true);
+      setError('');
+      const data = await api.addExemptFolder(editingAccount.id, newExemptFolder.trim());
+      setExemptFolders(data.exempt_folders || []);
+      setNewExemptFolder('');
+      setSuccess('Folder added to exempt list');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to add exempt folder');
+    } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
+  const handleRemoveExemptFolder = async (folder: string) => {
+    if (!editingAccount) return;
+    try {
+      setExemptFoldersLoading(true);
+      setError('');
+      const data = await api.removeExemptFolder(editingAccount.id, folder);
+      setExemptFolders(data.exempt_folders || []);
+      setSuccess(`Removed "${folder}" from exempt list`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to remove exempt folder');
+    } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
+  const handleEdit = (account: Account) => {
+    setEditingAccount(account);
+    setFormName(account.name);
+    setFormEmail(account.email);
+    if (account.provider === 'imap') {
+      setFormHost(account.imap_host);
+      setFormPort(account.imap_port);
+      setFormTLS(account.imap_tls);
+      setFormUsername(account.username || '');
+    }
+    setFormPassword('');
+    setShowForm(true);
+    setError('');
+    loadExemptFolders(account.id);
   };
 
   const handleDelete = async (account: Account) => {
@@ -206,25 +233,9 @@ export default function AccountList() {
     setFormTLS(true);
     setFormUsername('');
     setFormPassword('');
-    setSelectedProvider('imap');
-  };
-
-  const isOAuthProvider = (provider: string): boolean => {
-    return provider === 'microsoft365' || provider === 'gmail';
-  };
-
-  const getAccountProviderLabel = (account: Account): string => {
-    if (account.oauth_provider) {
-      return PROVIDER_LABELS[account.oauth_provider] || account.oauth_provider;
-    }
-    return 'IMAP';
-  };
-
-  const getAccountProviderIcon = (account: Account): string => {
-    if (account.oauth_provider) {
-      return PROVIDER_ICONS[account.oauth_provider] || '📧';
-    }
-    return '📧';
+    setEditingAccount(null);
+    setExemptFolders([]);
+    setNewExemptFolder('');
   };
 
   if (loading) {
@@ -242,10 +253,10 @@ export default function AccountList() {
           Accounts ({accounts.length})
         </h2>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={() => { setShowForm(!showForm); if (showForm) resetForm(); }}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
         >
-          + Add Account
+          {showForm ? 'Cancel' : '+ Add Account'}
         </button>
       </div>
 
@@ -255,167 +266,225 @@ export default function AccountList() {
         </div>
       )}
 
+      {success && (
+        <div className="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg text-green-700 dark:text-green-400 text-sm" role="status">
+          {success}
+        </div>
+      )}
+
+      {/* OAuth connect buttons */}
+      {oauthProviders.length > 0 && !showForm && (
+        <div className="mb-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-4">
+          <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Connect via OAuth</h3>
+          <div className="flex flex-wrap gap-3">
+            {oauthProviders.includes('gmail') && (
+              <button
+                onClick={() => handleOAuthConnect('gmail')}
+                disabled={oauthLoading !== null}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+                {oauthLoading === 'gmail' ? 'Connecting...' : 'Connect Gmail'}
+              </button>
+            )}
+            {oauthProviders.includes('microsoft365') && (
+              <button
+                onClick={() => handleOAuthConnect('microsoft365')}
+                disabled={oauthLoading !== null}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 23 23" aria-hidden="true">
+                  <path fill="#f35325" d="M1 1h10v10H1z"/>
+                  <path fill="#81bc06" d="M12 1h10v10H12z"/>
+                  <path fill="#05a6f0" d="M1 12h10v10H1z"/>
+                  <path fill="#ffba08" d="M12 12h10v10H12z"/>
+                </svg>
+                {oauthLoading === 'microsoft365' ? 'Connecting...' : 'Connect Microsoft 365'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Add account form */}
       {showForm && (
         <div className="mb-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
-          <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">Add Account</h3>
-
-          {/* Provider selection */}
-          <div className="mb-5">
-            <label htmlFor="provider-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Provider
-            </label>
-            <div className="grid grid-cols-3 gap-3">
-              <button
-                type="button"
-                onClick={() => setSelectedProvider('imap')}
-                className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border text-sm font-medium transition-colors ${
-                  selectedProvider === 'imap'
-                    ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400'
-                    : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600'
-                }`}
-              >
-                <span>📧</span> IMAP
-              </button>
-              {availableOAuthProviders.some(p => p.name === 'microsoft365') && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedProvider('microsoft365')}
-                  className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border text-sm font-medium transition-colors ${
-                    selectedProvider === 'microsoft365'
-                      ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400'
-                      : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600'
-                  }`}
-                >
-                  <span>🏢</span> Microsoft 365
-                </button>
-              )}
-              {availableOAuthProviders.some(p => p.name === 'gmail') && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedProvider('gmail')}
-                  className={`flex items-center justify-center gap-2 px-4 py-3 rounded-lg border text-sm font-medium transition-colors ${
-                    selectedProvider === 'gmail'
-                      ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400'
-                      : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600'
-                  }`}
-                >
-                  <span>✉️</span> Gmail
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* IMAP form */}
-          {selectedProvider === 'imap' && (
+          {/* OAuth Account Edit Form */}
+          {editingAccount && editingAccount.provider !== 'imap' ? (
             <>
-              <div className="grid grid-cols-2 gap-4">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
+                Edit: {editingAccount.name}
+              </h3>
+              <div className="space-y-4">
                 <div>
-                  <label htmlFor="acc-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
-                  <input id="acc-name" type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Personal" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Account Type
+                  </label>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    {editingAccount.provider === 'gmail' ? 'Gmail (OAuth)' : 'Microsoft 365 (OAuth)'}
+                  </p>
                 </div>
                 <div>
-                  <label htmlFor="acc-email" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
-                  <input id="acc-email" type="email" value={formEmail} onChange={(e) => setFormEmail(e.target.value)} placeholder="user@example.com" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Email
+                  </label>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">{editingAccount.email}</p>
                 </div>
-                <div>
-                  <label htmlFor="acc-host" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">IMAP Host</label>
-                  <input id="acc-host" type="text" value={formHost} onChange={(e) => setFormHost(e.target.value)} placeholder="imap.example.com" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label htmlFor="acc-port" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Port</label>
-                    <input id="acc-port" type="number" value={formPort} onChange={(e) => setFormPort(parseInt(e.target.value) || 993)} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
-                  </div>
-                  <div className="flex items-end pb-2">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" checked={formTLS} onChange={(e) => setFormTLS(e.target.checked)} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">TLS</span>
-                    </label>
-                  </div>
-                </div>
-                <div>
-                  <label htmlFor="acc-user" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Username (optional)</label>
-                  <input id="acc-user" type="text" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} placeholder="Defaults to email" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
-                <div>
-                  <label htmlFor="acc-pass" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
-                  <input id="acc-pass" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 text-sm text-blue-700 dark:text-blue-400">
+                  To update your authentication, click the reauthenticate button below.
                 </div>
               </div>
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => handleOAuthConnect(editingAccount.provider)}
+                  disabled={oauthLoading !== null}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {oauthLoading === editingAccount.provider ? 'Reauthenticating...' : '🔄 Reauthenticate'}
+                </button>
+                <button
+                  onClick={() => { setShowForm(false); resetForm(); }}
+                  className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+
+              {/* Exempt Folders - inline with account editing */}
+              <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Exempt Folders</h4>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Messages moved to these folders won&apos;t trigger automatic rule creation.</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <input
+                    type="text"
+                    value={newExemptFolder}
+                    onChange={(e) => setNewExemptFolder(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddExemptFolder(); }}
+                    placeholder="Folder name"
+                    className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                    + Add
+                  </button>
+                </div>
+                {exemptFoldersLoading ? (
+                  <p className="text-sm text-gray-500">Loading...</p>
+                ) : exemptFolders.length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No exempt folders. Moves to any folder will trigger rule creation.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {exemptFolders.map((folder) => (
+                      <div key={folder} className="flex items-center justify-between p-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                        <p className="text-sm font-medium text-gray-900 dark:text-white">📁 {folder}</p>
+                        <button onClick={() => handleRemoveExemptFolder(folder)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Remove" aria-label={`Remove ${folder} from exempt list`}>
+                          🗑
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-4">
+                {editingAccount ? `Edit: ${editingAccount.name}` : 'New IMAP Account'}
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="acc-name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
+              <input id="acc-name" type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Personal" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <div>
+              <label htmlFor="acc-email" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
+              <input id="acc-email" type="email" value={formEmail} onChange={(e) => setFormEmail(e.target.value)} placeholder="user@example.com" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <div>
+              <label htmlFor="acc-host" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">IMAP Host</label>
+              <input id="acc-host" type="text" value={formHost} onChange={(e) => setFormHost(e.target.value)} placeholder="imap.example.com" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="acc-port" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Port</label>
+                <input id="acc-port" type="number" value={formPort} onChange={(e) => setFormPort(parseInt(e.target.value) || 993)} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={formTLS} onChange={(e) => setFormTLS(e.target.checked)} className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">TLS</span>
+                </label>
+              </div>
+            </div>
+            <div>
+              <label htmlFor="acc-user" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Username (optional)</label>
+              <input id="acc-user" type="text" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} placeholder="Defaults to email" className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+            <div>
+              <label htmlFor="acc-pass" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Password{editingAccount && <span className="text-gray-400 font-normal"> (leave blank to keep current)</span>}
+              </label>
+              <input id="acc-pass" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} placeholder={editingAccount ? '••••••••' : ''} className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+            </div>
+              </div>
               <div className="flex gap-3 mt-4">
-                <button onClick={handleCreate} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
-                  {formSaving ? 'Creating...' : 'Create Account'}
+                <button onClick={handleSave} disabled={formSaving} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                  {formSaving ? (editingAccount ? 'Updating...' : 'Creating...') : (editingAccount ? 'Update Account' : 'Create Account')}
                 </button>
                 <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
                   Cancel
                 </button>
               </div>
+
+              {/* Exempt Folders - inline with account editing */}
+              {editingAccount && (
+                <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Exempt Folders</h4>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Messages moved to these folders won&apos;t trigger automatic rule creation.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={newExemptFolder}
+                      onChange={(e) => setNewExemptFolder(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleAddExemptFolder(); }}
+                      placeholder="Folder name"
+                      className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                    <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                      + Add
+                    </button>
+                  </div>
+                  {exemptFoldersLoading ? (
+                    <p className="text-sm text-gray-500">Loading...</p>
+                  ) : exemptFolders.length === 0 ? (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">No exempt folders. Moves to any folder will trigger rule creation.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {exemptFolders.map((folder) => (
+                        <div key={folder} className="flex items-center justify-between p-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white">📁 {folder}</p>
+                          <button onClick={() => handleRemoveExemptFolder(folder)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Remove" aria-label={`Remove ${folder} from exempt list`}>
+                            🗑
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
-          )}
-
-          {/* Microsoft 365 OAuth */}
-          {selectedProvider === 'microsoft365' && (
-            <div className="text-center py-6">
-              <div className="text-4xl mb-3">🏢</div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Connect your Microsoft 365 account using OAuth2. You&apos;ll be redirected to Microsoft to authorize access.
-              </p>
-              <div className="flex justify-center gap-3">
-                <button
-                  onClick={() => handleOAuthConnect('microsoft365')}
-                  disabled={oauthConnecting === 'microsoft365'}
-                  className="px-6 py-3 bg-[#0078d4] text-white rounded-lg text-sm font-medium hover:bg-[#106ebe] disabled:opacity-50 transition-colors flex items-center gap-2"
-                >
-                  {oauthConnecting === 'microsoft365' ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      Connecting...
-                    </>
-                  ) : (
-                    'Connect with Microsoft 365'
-                  )}
-                </button>
-                <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-3 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Gmail OAuth */}
-          {selectedProvider === 'gmail' && (
-            <div className="text-center py-6">
-              <div className="text-4xl mb-3">✉️</div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                Connect your Gmail account using OAuth2. You&apos;ll be redirected to Google to authorize access.
-              </p>
-              <div className="flex justify-center gap-3">
-                <button
-                  onClick={() => handleOAuthConnect('gmail')}
-                  disabled={oauthConnecting === 'gmail'}
-                  className="px-6 py-3 bg-[#ea4335] text-white rounded-lg text-sm font-medium hover:bg-[#d33426] disabled:opacity-50 transition-colors flex items-center gap-2"
-                >
-                  {oauthConnecting === 'gmail' ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      Connecting...
-                    </>
-                  ) : (
-                    'Connect with Gmail'
-                  )}
-                </button>
-                <button onClick={() => { setShowForm(false); resetForm(); }} className="px-4 py-3 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
-                  Cancel
-                </button>
-              </div>
-            </div>
           )}
         </div>
       )}
@@ -436,7 +505,6 @@ export default function AccountList() {
               <div className="flex items-start justify-between">
                 <div>
                   <div className="flex items-center gap-2">
-                    <span>{getAccountProviderIcon(account)}</span>
                     <h3 className="font-medium text-gray-900 dark:text-white">{account.name}</h3>
                     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
                       account.active
@@ -445,32 +513,23 @@ export default function AccountList() {
                     }`}>
                       {account.active ? 'Active' : 'Disabled'}
                     </span>
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
-                      {getAccountProviderLabel(account)}
-                    </span>
                   </div>
                   <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{account.email}</p>
                   <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                    {account.oauth_provider
-                      ? `OAuth2 • ${PROVIDER_LABELS[account.oauth_provider] || account.oauth_provider}`
-                      : `IMAP • ${account.imap_host}:${account.imap_port}`
-                    }
+                    {account.provider.toUpperCase()} • {account.imap_host}:{account.imap_port}
                     {account.last_sync_at && ` • Last sync: ${new Date(account.last_sync_at).toLocaleString()}`}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button onClick={() => handleEdit(account)} className="p-2 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors" title="Edit" aria-label="Edit account">
+                    ✏️
+                  </button>
                   <button onClick={() => handleToggle(account)} className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors" title={account.active ? 'Disable' : 'Enable'} aria-label={account.active ? 'Disable account' : 'Enable account'}>
                     {account.active ? '⏸' : '▶️'}
                   </button>
-                  {account.oauth_provider ? (
-                    <button onClick={() => handleDisconnect(account)} className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Disconnect" aria-label="Disconnect OAuth2 account">
-                      🔌
-                    </button>
-                  ) : (
-                    <button onClick={() => handleDelete(account)} className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Delete" aria-label="Delete account">
-                      🗑
-                    </button>
-                  )}
+                  <button onClick={() => handleDelete(account)} className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Delete" aria-label="Delete account">
+                    🗑
+                  </button>
                 </div>
               </div>
             </div>

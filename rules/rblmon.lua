@@ -14,10 +14,9 @@ local no_block_phrases = {
     "all clear", "clean", "0 blacklists", "0 blocks", "found on 0",
 }
 
-for _, phrase in ipairs(no_block_phrases) do
-    if subject:find(phrase, 1, true) or preview:find(phrase, 1, true) then
-        return delete("rblmon all-clear notification")
-    end
+if contains_any(subject, no_block_phrases) or
+   contains_any(preview, no_block_phrases) then
+    return delete("rblmon all-clear notification")
 end
 
 return skip()

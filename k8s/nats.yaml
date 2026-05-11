@@ -8,6 +8,8 @@ metadata:
     app.kubernetes.io/component: nats
 spec:
   replicas: 1
+  strategy:
+    type: Recreate  # PVC can only be mounted by one pod
   selector:
     matchLabels:
       app.kubernetes.io/name: email-automation
@@ -28,13 +30,18 @@ spec:
               name: monitoring
           args:
             - "--http_port=8222"
+            - "--jetstream"
+            - "--store_dir=/data/jetstream"
+          volumeMounts:
+            - name: jetstream-data
+              mountPath: /data/jetstream
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
+              cpu: 100m
               memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           livenessProbe:
             httpGet:
               path: /healthz
@@ -47,6 +54,25 @@ spec:
               port: 8222
             initialDelaySeconds: 3
             periodSeconds: 5
+      volumes:
+        - name: jetstream-data
+          persistentVolumeClaim:
+            claimName: nats-jetstream-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-jetstream-data
+  namespace: email-automation
+  labels:
+    app.kubernetes.io/name: email-automation
+    app.kubernetes.io/component: nats
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service

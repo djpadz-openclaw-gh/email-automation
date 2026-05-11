@@ -4,9 +4,9 @@
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-if not sender:find("contabo.com", 1, true) then return skip() end
+if not sender:match("contabo%.com") then return skip() end
 
-if not (subject:find("credit card payment", 1, true) or subject:find("invoice", 1, true)) then
+if not (subject:match("credit card payment") or subject:match("invoice")) then
     return skip()
 end
 

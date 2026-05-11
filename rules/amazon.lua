@@ -5,11 +5,13 @@
 local sender = email.sender_address:lower()
 local subject = email.subject:lower()
 
-local domains = {
-    "amazon.com", "amazon.co.uk", "amazon.ca", "amazon.de",
-    "amazon.fr", "amazon.co.jp", "amazon.com.au", "marketplace.amazon.com",
-}
+-- Check sender domain
+if not sender:match("amazon%.co") and
+   not sender:match("marketplace%.amazon") then
+    return skip()
+end
 
+-- Check subject keywords
 local keywords = {
     "your order", "order #", "order number", "has shipped", "order shipped",
     "out for delivery", "delivered", "your package", "your shipment",
@@ -17,18 +19,6 @@ local keywords = {
     "order update", "review your upcoming", "subscribe & save",
 }
 
--- Check sender domain
-local sender_match = false
-for _, domain in ipairs(domains) do
-    if sender:find(domain, 1, true) then
-        sender_match = true
-        break
-    end
-end
-
-if not sender_match then return skip() end
-
--- Check subject keywords
 if not contains_any(subject, keywords) then return skip() end
 
 -- Hold in inbox until 24h old, then file
