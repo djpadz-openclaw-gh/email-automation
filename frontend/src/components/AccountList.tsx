@@ -25,6 +25,11 @@ export default function AccountList() {
   const [formPassword, setFormPassword] = useState('');
   const [formSaving, setFormSaving] = useState(false);
 
+  // Exempt folders state
+  const [exemptFolders, setExemptFolders] = useState<string[]>([]);
+  const [exemptFoldersLoading, setExemptFoldersLoading] = useState(false);
+  const [newExemptFolder, setNewExemptFolder] = useState('');
+
   const loadAccounts = useCallback(async () => {
     try {
       setLoading(true);
@@ -144,6 +149,47 @@ export default function AccountList() {
     }
   };
 
+  const loadExemptFolders = async (accountId: number) => {
+    try {
+      setExemptFoldersLoading(true);
+      const data = await api.listExemptFolders(accountId);
+      setExemptFolders(data.exempt_folders || []);
+    } catch { /* ignore */ } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
+  const handleAddExemptFolder = async () => {
+    if (!newExemptFolder.trim() || !editingAccount) return;
+    try {
+      setExemptFoldersLoading(true);
+      setError('');
+      const data = await api.addExemptFolder(editingAccount.id, newExemptFolder.trim());
+      setExemptFolders(data.exempt_folders || []);
+      setNewExemptFolder('');
+      setSuccess('Folder added to exempt list');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to add exempt folder');
+    } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
+  const handleRemoveExemptFolder = async (folder: string) => {
+    if (!editingAccount) return;
+    try {
+      setExemptFoldersLoading(true);
+      setError('');
+      const data = await api.removeExemptFolder(editingAccount.id, folder);
+      setExemptFolders(data.exempt_folders || []);
+      setSuccess(`Removed "${folder}" from exempt list`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to remove exempt folder');
+    } finally {
+      setExemptFoldersLoading(false);
+    }
+  };
+
   const handleEdit = (account: Account) => {
     setEditingAccount(account);
     setFormName(account.name);
@@ -157,6 +203,7 @@ export default function AccountList() {
     setFormPassword('');
     setShowForm(true);
     setError('');
+    loadExemptFolders(account.id);
   };
 
   const handleDelete = async (account: Account) => {
@@ -187,6 +234,8 @@ export default function AccountList() {
     setFormUsername('');
     setFormPassword('');
     setEditingAccount(null);
+    setExemptFolders([]);
+    setNewExemptFolder('');
   };
 
   if (loading) {
@@ -305,6 +354,45 @@ export default function AccountList() {
                   Close
                 </button>
               </div>
+
+              {/* Exempt Folders - inline with account editing */}
+              <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Exempt Folders</h4>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Messages moved to these folders won&apos;t trigger automatic rule creation.</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <input
+                    type="text"
+                    value={newExemptFolder}
+                    onChange={(e) => setNewExemptFolder(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddExemptFolder(); }}
+                    placeholder="Folder name"
+                    className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                    + Add
+                  </button>
+                </div>
+                {exemptFoldersLoading ? (
+                  <p className="text-sm text-gray-500">Loading...</p>
+                ) : exemptFolders.length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No exempt folders. Moves to any folder will trigger rule creation.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {exemptFolders.map((folder) => (
+                      <div key={folder} className="flex items-center justify-between p-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                        <p className="text-sm font-medium text-gray-900 dark:text-white">📁 {folder}</p>
+                        <button onClick={() => handleRemoveExemptFolder(folder)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Remove" aria-label={`Remove ${folder} from exempt list`}>
+                          🗑
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </>
           ) : (
             <>
@@ -355,6 +443,47 @@ export default function AccountList() {
                   Cancel
                 </button>
               </div>
+
+              {/* Exempt Folders - inline with account editing */}
+              {editingAccount && (
+                <div className="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Exempt Folders</h4>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Messages moved to these folders won&apos;t trigger automatic rule creation.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={newExemptFolder}
+                      onChange={(e) => setNewExemptFolder(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleAddExemptFolder(); }}
+                      placeholder="Folder name"
+                      className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                    <button onClick={handleAddExemptFolder} disabled={exemptFoldersLoading || !newExemptFolder.trim()} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                      + Add
+                    </button>
+                  </div>
+                  {exemptFoldersLoading ? (
+                    <p className="text-sm text-gray-500">Loading...</p>
+                  ) : exemptFolders.length === 0 ? (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">No exempt folders. Moves to any folder will trigger rule creation.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {exemptFolders.map((folder) => (
+                        <div key={folder} className="flex items-center justify-between p-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white">📁 {folder}</p>
+                          <button onClick={() => handleRemoveExemptFolder(folder)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors" title="Remove" aria-label={`Remove ${folder} from exempt list`}>
+                            🗑
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
