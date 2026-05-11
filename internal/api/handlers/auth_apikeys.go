@@ -165,10 +165,9 @@ func (h *AuthHandlers) GetProfile(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"id":            user.ID,
 		"username":      user.Username,
-		"role":          user.Role,
+		"role":          role,
 		"totp_enabled":  user.TOTPEnabled,
 		"passkey_count": passkeyCount,
-		"role":          role,
 		"created_at":    user.CreatedAt,
 	})
 }
