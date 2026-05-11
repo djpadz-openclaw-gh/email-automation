@@ -79,6 +79,12 @@ func (h *AuthHandlers) generateTokenResponse(c *fiber.Ctx, user *models.User) er
 	// Record successful login
 	_ = h.DB.RecordLoginAttempt(c.Context(), user.Username, c.IP(), true)
 
+	// User #1 is always admin
+	role := user.Role
+	if user.ID == 1 {
+		role = "admin"
+	}
+
 	return c.JSON(fiber.Map{
 		"token":      token,
 		"expires_at": expiresAt.Format(time.RFC3339),
@@ -86,6 +92,7 @@ func (h *AuthHandlers) generateTokenResponse(c *fiber.Ctx, user *models.User) er
 			"id":           user.ID,
 			"username":     user.Username,
 			"totp_enabled": user.TOTPEnabled,
+			"role":         role,
 		},
 	})
 }
