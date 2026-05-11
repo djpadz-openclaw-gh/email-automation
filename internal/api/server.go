@@ -138,7 +138,6 @@ func (s *Server) setupRoutes() {
 	kiroH := handlers.NewKiroHandlers(s.config)
 	s.app.Post("/api/kiro", kiroH.Proxy)
 	kiro := s.app.Group("/api/kiro")
-	kiro.Post("", kiroH.KiroProxy)                                    // Generic proxy endpoint
 	kiro.Post("/translate/english-to-lua", kiroH.TranslateEnglishToLua)
 	kiro.Post("/translate/lua-to-english", kiroH.TranslateLuaToEnglish)
 
@@ -198,7 +197,7 @@ func (s *Server) setupRoutes() {
 	v1.Patch("/rules/reorder", ruleH.ReorderRules)
 
 	// Accounts
-	accountH := &handlers.AccountHandlers{DB: s.db, Bus: s.bus}
+	accountH := &handlers.AccountHandlers{DB: s.db}
 	v1.Get("/accounts", accountH.ListAccounts)
 	v1.Get("/accounts/:id", accountH.GetAccount)
 	v1.Post("/accounts", accountH.CreateAccount)
@@ -223,7 +222,6 @@ func (s *Server) setupRoutes() {
 
 	// OAuth2
 	oauth2H := handlers.NewOAuth2Handlers(s.db, s.config)
-	oauth2H.Bus = s.bus
 	v1.Get("/oauth2/providers", oauth2H.ListProviders)
 	v1.Get("/oauth2/connect/:provider", oauth2H.Connect)
 	v1.Post("/oauth2/refresh/:id", oauth2H.RefreshToken)
