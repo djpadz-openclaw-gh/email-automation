@@ -368,7 +368,7 @@ func (db *DB) GetAccount(ctx context.Context, tenantID, id int64) (*models.Accou
 
 func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Account, error) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, oauth_provider, active, last_sync_at, created_at, updated_at
+		`SELECT id, tenant_id, name, email, provider, imap_host, imap_port, imap_tls, username, oauth_provider, active, last_sync_at, last_connection_test_at, last_connection_status, last_connection_error, created_at, updated_at
 		 FROM accounts WHERE tenant_id = $1 ORDER BY id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -378,8 +378,15 @@ func (db *DB) ListAccounts(ctx context.Context, tenantID int64) ([]models.Accoun
 	var accounts []models.Account
 	for rows.Next() {
 		var a models.Account
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		var connStatus, connError *string
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.Email, &a.Provider, &a.IMAPHost, &a.IMAPPort, &a.IMAPTLS, &a.Username, &a.OAuthProvider, &a.Active, &a.LastSyncAt, &a.LastConnectionTestAt, &connStatus, &connError, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if connStatus != nil {
+			a.LastConnectionStatus = *connStatus
+		}
+		if connError != nil {
+			a.LastConnectionError = *connError
 		}
 		accounts = append(accounts, a)
 	}
@@ -918,6 +925,14 @@ func (db *DB) IsRuleAppliedMove(ctx context.Context, accountID int64, messageID 
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// UpdateConnectionTestResult stores the result of a connection test for an account.
+func (db *DB) UpdateConnectionTestResult(ctx context.Context, accountID int64, status string, errMsg string) error {
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE accounts SET last_connection_test_at = NOW(), last_connection_status = $1, last_connection_error = $2, updated_at = NOW() WHERE id = $3`,
+		status, errMsg, accountID)
+	return err
 }
 
 // CleanOldRuleAppliedMoves removes rule_applied_moves entries older than 24 hours.

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import api, { Rule, AuthResponse } from '@/lib/api';
 import RuleEditor from '@/components/RuleEditor';
 import RuleList from '@/components/RuleList';
@@ -15,14 +16,50 @@ import AdminUsers from '@/components/AdminUsers';
 type Tab = 'rules' | 'accounts' | 'logs' | 'pending' | 'admin' | 'settings';
 type AuthView = 'login' | 'register';
 
+const VALID_TABS: Tab[] = ['rules', 'accounts', 'logs', 'pending', 'admin', 'settings'];
+
+function isValidTab(value: string | null): value is Tab {
+  return value !== null && VALID_TABS.includes(value as Tab);
+}
+
 export default function Home() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50 dark:bg-gray-950" />}>
+      <HomeContent />
+    </Suspense>
+  );
+}
+
+function HomeContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
   const [token, setToken] = useState<string>('');
   const [username, setUsername] = useState<string>('');
   const [authView, setAuthView] = useState<AuthView>('login');
-  const [activeTab, setActiveTab] = useState<Tab>('rules');
   const [editingRule, setEditingRule] = useState<Rule | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [registrationEnabled, setRegistrationEnabled] = useState(true);
+
+  // Derive active tab from URL search params
+  const tabParam = searchParams.get('tab');
+  const activeTab: Tab = isValidTab(tabParam) ? tabParam : 'rules';
+
+  // Update URL when switching tabs
+  const setActiveTab = useCallback((tab: Tab) => {
+    const params = new URLSearchParams(searchParams.toString());
+    // Clean up OAuth params when navigating away
+    params.delete('oauth_success');
+    params.delete('oauth_error');
+    if (tab === 'rules') {
+      params.delete('tab');
+    } else {
+      params.set('tab', tab);
+    }
+    const query = params.toString();
+    router.push(`${pathname}${query ? `?${query}` : ''}`);
+  }, [searchParams, router, pathname]);
 
   useEffect(() => {
     const stored = localStorage.getItem('ea_token');
@@ -41,7 +78,10 @@ export default function Home() {
     // If returning from OAuth flow, switch to accounts tab
     const params = new URLSearchParams(window.location.search);
     if (params.has('oauth_success') || params.has('oauth_error')) {
-      setActiveTab('accounts');
+      // Update URL to reflect accounts tab (preserving OAuth params for display)
+      const newParams = new URLSearchParams(params);
+      newParams.set('tab', 'accounts');
+      router.replace(`${pathname}?${newParams.toString()}`);
     }
 
     // Fetch config to check if registration is enabled

@@ -29,8 +29,17 @@ export interface Account {
   active: boolean;
   oauth_provider?: string; // microsoft365, gmail
   last_sync_at: string | null;
+  last_connection_test_at: string | null;
+  last_connection_status: string | null;
+  last_connection_error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ConnectionTestResult {
+  status: 'connected' | 'failed';
+  error?: string;
+  tested_at: string;
 }
 
 export interface OAuth2Provider {
@@ -485,6 +494,12 @@ class ApiClient {
 
   async deleteAccount(id: number): Promise<void> {
     await this.request(`/api/v1/accounts/${id}`, { method: 'DELETE' });
+  }
+
+  async testConnection(id: number): Promise<ConnectionTestResult> {
+    return this.request<ConnectionTestResult>(`/api/v1/accounts/${id}/test-connection`, {
+      method: 'POST',
+    });
   }
 
   // --- OAuth2 ---

@@ -204,6 +204,10 @@ func (s *Server) setupRoutes() {
 	v1.Put("/accounts/:id", accountH.UpdateAccount)
 	v1.Delete("/accounts/:id", accountH.DeleteAccount)
 
+	// Connection testing
+	connTestH := handlers.NewConnectionTestHandlers(s.db, s.config)
+	v1.Post("/accounts/:id/test-connection", connTestH.TestConnection)
+
 	// Email metadata
 	metadataH := &handlers.MetadataHandlers{DB: s.db}
 	v1.Post("/emails/:messageId/metadata", metadataH.AttachMetadata)

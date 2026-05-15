@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import api, { Account } from '@/lib/api';
+import api, { Account, ConnectionTestResult } from '@/lib/api';
 
 export default function AccountList() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -29,6 +29,9 @@ export default function AccountList() {
   const [exemptFolders, setExemptFolders] = useState<string[]>([]);
   const [exemptFoldersLoading, setExemptFoldersLoading] = useState(false);
   const [newExemptFolder, setNewExemptFolder] = useState('');
+
+  // Connection test state
+  const [testingAccountId, setTestingAccountId] = useState<number | null>(null);
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -222,6 +225,25 @@ export default function AccountList() {
       await loadAccounts();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to update account');
+    }
+  };
+
+  const handleTestConnection = async (account: Account) => {
+    try {
+      setTestingAccountId(account.id);
+      setError('');
+      setSuccess('');
+      const result: ConnectionTestResult = await api.testConnection(account.id);
+      if (result.status === 'connected') {
+        setSuccess(`Connection to ${account.name} successful!`);
+      } else {
+        setError(`Connection to ${account.name} failed: ${result.error}`);
+      }
+      await loadAccounts();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : `Failed to test connection for ${account.name}`);
+    } finally {
+      setTestingAccountId(null);
     }
   };
 
@@ -513,14 +535,56 @@ export default function AccountList() {
                     }`}>
                       {account.active ? 'Active' : 'Disabled'}
                     </span>
+                    {/* Connection status indicator */}
+                    {account.last_connection_status && (
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                          account.last_connection_status === 'connected'
+                            ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400'
+                            : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
+                        }`}
+                        title={account.last_connection_status === 'failed' && account.last_connection_error
+                          ? account.last_connection_error
+                          : `Last tested: ${account.last_connection_test_at ? new Date(account.last_connection_test_at).toLocaleString() : 'never'}`
+                        }
+                      >
+                        <span className={`inline-block w-2 h-2 rounded-full ${
+                          account.last_connection_status === 'connected'
+                            ? 'bg-emerald-500'
+                            : 'bg-red-500'
+                        }`} aria-hidden="true" />
+                        {account.last_connection_status === 'connected' ? 'Connected' : 'Failed'}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{account.email}</p>
                   <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                     {account.provider.toUpperCase()} • {account.imap_host}:{account.imap_port}
                     {account.last_sync_at && ` • Last sync: ${new Date(account.last_sync_at).toLocaleString()}`}
                   </p>
+                  {account.last_connection_status === 'failed' && account.last_connection_error && (
+                    <p className="text-xs text-red-500 dark:text-red-400 mt-1 max-w-md truncate" title={account.last_connection_error}>
+                      ⚠️ {account.last_connection_error}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleTestConnection(account)}
+                    disabled={testingAccountId !== null}
+                    className="p-2 text-gray-400 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Test Connection"
+                    aria-label="Test connection"
+                  >
+                    {testingAccountId === account.id ? (
+                      <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    ) : (
+                      <span>🔌</span>
+                    )}
+                  </button>
                   <button onClick={() => handleEdit(account)} className="p-2 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors" title="Edit" aria-label="Edit account">
                     ✏️
                   </button>
