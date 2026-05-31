@@ -26,6 +26,19 @@ export default function LogViewer() {
     loadLogs();
   }, [limit]);
 
+  const formatLocalTime = (isoString: string): string => {
+    const date = new Date(isoString);
+    return new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'short',
+    }).format(date);
+  };
+
   const actionEmoji = (action: string) => {
     switch (action) {
       case 'delete': return '🗑';
@@ -105,7 +118,7 @@ export default function LogViewer() {
                 {logs.map((log) => (
                   <tr key={log.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
                     <td className="px-4 py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                      {new Date(log.executed_at).toLocaleString()}
+                      {formatLocalTime(log.executed_at)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <span className="inline-flex items-center gap-1">
